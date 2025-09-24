@@ -15,7 +15,7 @@ const dbConfig = {
   user: "vldgkamz_luay",
   password: "libraayra20", // atau password kamu
   database: "vldgkamz_manajemensekolah",
-  port: 3307,
+  port: 3306,
 };
 
 // Konfigurasi JWT secret
@@ -1632,15 +1632,14 @@ app.use((error, req, res, next) => {
     .json({ error: "Terjadi kesalahan server yang tidak terduga" });
 });
 
-async function buatHash(pw) {
-  const saltRounds = 10;
-  const hash = await bcrypt.hash(pw, saltRounds);
-  console.log("Hash baru:", hash);
-}
+// async function buatHash(pw) {
+//   const saltRounds = 10;
+//   const hash = await bcrypt.hash(pw, saltRounds);
+//   console.log("Hash baru:", hash);
+// }
 
-buatHash("password123");
-
-const PORT = 3001;
+// buatHash("password123");
+const PORT = process.env.PORT ;
 app.listen(PORT, () => {
   console.log(`Server berjalan di port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
