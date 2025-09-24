@@ -11,10 +11,10 @@ app.use(cors());
 
 // Konfigurasi database langsung (ganti dengan nilai yang sesuai)
 const dbConfig = {
-  host: "localhost",
-  user: "root",
-  password: "libraayra", // atau password kamu
-  database: "manajemen_sekolah",
+  host: "Libra.web.id",
+  user: "vldgkamz_luay",
+  password: "libraayra20", // atau password kamu
+  database: "vldgkamz_manajemensekolah",
   port: 3307,
 };
 
