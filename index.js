@@ -485,9 +485,10 @@ app.get("/api/guru/:id", authenticateToken, async (req, res) => {
     console.log("Mengambil data guru by ID:", id);
 
     const connection = await getConnection();
-    
+
     // Query yang diperbaiki - ambil data guru dengan mata pelajaran dari tabel many-to-many
-    const [guru] = await connection.execute(`
+    const [guru] = await connection.execute(
+      `
       SELECT 
         u.*, 
         k.nama as kelas_nama,
@@ -500,8 +501,10 @@ app.get("/api/guru/:id", authenticateToken, async (req, res) => {
       LEFT JOIN mata_pelajaran mp ON gmp.mata_pelajaran_id = mp.id
       WHERE u.id = ?
       GROUP BY u.id
-    `, [id]);
-    
+    `,
+      [id]
+    );
+
     await connection.end();
 
     if (guru.length === 0) {
@@ -1401,21 +1404,106 @@ app.post("/api/rpp", authenticateToken, async (req, res) => {
   }
 });
 
-// Get Jadwal Mengajar
+// Get all hari
+app.get("/api/hari", authenticateToken, async (req, res) => {
+  try {
+    console.log("Mengambil data hari");
+    const connection = await getConnection();
+    const [hari] = await connection.execute(
+      "SELECT * FROM hari ORDER BY urutan"
+    );
+    await connection.end();
+    console.log("Berhasil mengambil data hari, jumlah:", hari.length);
+    res.json(hari);
+  } catch (error) {
+    console.error("ERROR GET HARI:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data hari" });
+  }
+});
+
+// Get all semester
+app.get("/api/semester", authenticateToken, async (req, res) => {
+  try {
+    console.log("Mengambil data semester");
+    const connection = await getConnection();
+    const [semester] = await connection.execute(
+      "SELECT * FROM semester ORDER BY nama"
+    );
+    await connection.end();
+    console.log("Berhasil mengambil data semester, jumlah:", semester.length);
+    res.json(semester);
+  } catch (error) {
+    console.error("ERROR GET SEMESTER:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data semester" });
+  }
+});
+
+// Get all jam pelajaran
+app.get("/api/jam-pelajaran", authenticateToken, async (req, res) => {
+  try {
+    console.log("Mengambil data jam pelajaran");
+    const connection = await getConnection();
+    const [jamPelajaran] = await connection.execute(
+      "SELECT * FROM jam_pelajaran ORDER BY jam_ke"
+    );
+    await connection.end();
+    console.log(
+      "Berhasil mengambil data jam pelajaran, jumlah:",
+      jamPelajaran.length
+    );
+    res.json(jamPelajaran);
+  } catch (error) {
+    console.error("ERROR GET JAM PELAJARAN:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data jam pelajaran" });
+  }
+});
+
+// Create jam pelajaran
+app.post("/api/jam-pelajaran", authenticateToken, async (req, res) => {
+  try {
+    console.log("Menambah jam pelajaran baru:", req.body);
+    const { jam_ke, jam_mulai, jam_selesai } = req.body;
+    const id = crypto.randomUUID();
+
+    const connection = await getConnection();
+    await connection.execute(
+      "INSERT INTO jam_pelajaran (id, jam_ke, jam_mulai, jam_selesai) VALUES (?, ?, ?, ?)",
+      [id, jam_ke, jam_mulai, jam_selesai]
+    );
+    await connection.end();
+
+    console.log("Jam pelajaran berhasil ditambahkan:", id);
+    res.json({ message: "Jam pelajaran berhasil ditambahkan", id });
+  } catch (error) {
+    console.error("ERROR POST JAM PELAJARAN:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal menambah jam pelajaran" });
+  }
+});
+
+// Update Get Jadwal Mengajar untuk menggunakan struktur baru
 app.get("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
   try {
-    const { guru_id, kelas_id, hari, semester, tahun_ajaran } = req.query;
+    const { guru_id, kelas_id, hari_id, semester_id, tahun_ajaran } = req.query;
     console.log("Mengambil data jadwal mengajar");
 
     let query = `
       SELECT jm.*, 
         u.nama as guru_nama,
         mp.nama as mata_pelajaran_nama,
-        k.nama as kelas_nama
+        k.nama as kelas_nama,
+        h.nama as hari_nama,
+        s.nama as semester_nama,
+        jp.jam_ke,
+        jp.jam_mulai,
+        jp.jam_selesai
       FROM jadwal_mengajar jm
       JOIN users u ON jm.guru_id = u.id
       JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
       JOIN kelas k ON jm.kelas_id = k.id
+      JOIN hari h ON jm.hari_id = h.id
+      JOIN semester s ON jm.semester_id = s.id
+      JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
       WHERE 1=1
     `;
     let params = [];
@@ -1430,14 +1518,14 @@ app.get("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
       params.push(kelas_id);
     }
 
-    if (hari) {
-      query += " AND jm.hari = ?";
-      params.push(hari);
+    if (hari_id) {
+      query += " AND jm.hari_id = ?";
+      params.push(hari_id);
     }
 
-    if (semester) {
-      query += " AND jm.semester = ?";
-      params.push(semester);
+    if (semester_id) {
+      query += " AND jm.semester_id = ?";
+      params.push(semester_id);
     }
 
     if (tahun_ajaran) {
@@ -1445,13 +1533,16 @@ app.get("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
       params.push(tahun_ajaran);
     }
 
-    query += " ORDER BY jm.hari, jm.jam_mulai";
+    query += " ORDER BY h.urutan, jp.jam_ke";
 
     const connection = await getConnection();
     const [jadwal] = await connection.execute(query, params);
     await connection.end();
 
-    console.log("Berhasil mengambil data jadwal mengajar, jumlah:", jadwal.length);
+    console.log(
+      "Berhasil mengambil data jadwal mengajar, jumlah:",
+      jadwal.length
+    );
     res.json(jadwal);
   } catch (error) {
     console.error("ERROR GET JADWAL MENGAJAR:", error.message);
@@ -1459,7 +1550,7 @@ app.get("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
   }
 });
 
-// Create Jadwal Mengajar
+// Update Create Jadwal Mengajar dengan validasi bentrokan
 app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
   try {
     console.log("Menambah jadwal mengajar baru:", req.body);
@@ -1467,40 +1558,64 @@ app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
       guru_id,
       mata_pelajaran_id,
       kelas_id,
-      hari,
-      jam_mulai,
-      jam_selesai,
-      semester,
-      tahun_ajaran
+      hari_id,
+      jam_pelajaran_id,
+      semester_id,
+      tahun_ajaran,
     } = req.body;
-    
+
     const id = crypto.randomUUID();
 
-    // Validasi jam
-    if (jam_mulai >= jam_selesai) {
-      return res.status(400).json({ error: "Jam mulai harus sebelum jam selesai" });
-    }
-
     const connection = await getConnection();
-    
-    // Cek konflik jadwal
-    const [konflik] = await connection.execute(
-      `SELECT * FROM jadwal_mengajar 
-       WHERE guru_id = ? AND hari = ? AND semester = ? AND tahun_ajaran = ?
-       AND ((jam_mulai <= ? AND jam_selesai > ?) OR (jam_mulai < ? AND jam_selesai >= ?))`,
-      [guru_id, hari, semester, tahun_ajaran, jam_selesai, jam_mulai, jam_selesai, jam_mulai]
+
+    // Cek konflik jadwal - guru, hari, semester, jam_pelajaran yang sama
+    const [konflikGuru] = await connection.execute(
+      `SELECT jm.*, u.nama as guru_nama, jp.jam_ke 
+       FROM jadwal_mengajar jm
+       JOIN users u ON jm.guru_id = u.id
+       JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+       WHERE jm.guru_id = ? AND jm.hari_id = ? AND jm.semester_id = ? AND jm.tahun_ajaran = ? AND jm.jam_pelajaran_id = ?`,
+      [guru_id, hari_id, semester_id, tahun_ajaran, jam_pelajaran_id]
     );
 
-    if (konflik.length > 0) {
+    if (konflikGuru.length > 0) {
       await connection.end();
-      return res.status(400).json({ error: "Guru memiliki jadwal yang bertabrakan" });
+      return res.status(400).json({
+        error: `Guru sudah memiliki jadwal di jam ke-${konflikGuru[0].jam_ke} pada hari yang sama`,
+      });
+    }
+
+    // Cek konflik jadwal - kelas, hari, semester, jam_pelajaran yang sama
+    const [konflikKelas] = await connection.execute(
+      `SELECT jm.*, k.nama as kelas_nama, jp.jam_ke 
+       FROM jadwal_mengajar jm
+       JOIN kelas k ON jm.kelas_id = k.id
+       JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+       WHERE jm.kelas_id = ? AND jm.hari_id = ? AND jm.semester_id = ? AND jm.tahun_ajaran = ? AND jm.jam_pelajaran_id = ?`,
+      [kelas_id, hari_id, semester_id, tahun_ajaran, jam_pelajaran_id]
+    );
+
+    if (konflikKelas.length > 0) {
+      await connection.end();
+      return res.status(400).json({
+        error: `Kelas sudah memiliki jadwal di jam ke-${konflikKelas[0].jam_ke} pada hari yang sama`,
+      });
     }
 
     await connection.execute(
-      "INSERT INTO jadwal_mengajar (id, guru_id, mata_pelajaran_id, kelas_id, hari, jam_mulai, jam_selesai, semester, tahun_ajaran) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, guru_id, mata_pelajaran_id, kelas_id, hari, jam_mulai, jam_selesai, semester, tahun_ajaran]
+      "INSERT INTO jadwal_mengajar (id, guru_id, mata_pelajaran_id, kelas_id, hari_id, jam_pelajaran_id, semester_id, tahun_ajaran) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        id,
+        guru_id,
+        mata_pelajaran_id,
+        kelas_id,
+        hari_id,
+        jam_pelajaran_id,
+        semester_id,
+        tahun_ajaran,
+      ]
     );
-    
+
     await connection.end();
 
     console.log("Jadwal mengajar berhasil ditambahkan:", id);
@@ -1512,7 +1627,7 @@ app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
   }
 });
 
-// Update Jadwal Mengajar
+// Update Jadwal Mengajar dengan validasi bentrokan
 app.put("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1521,38 +1636,62 @@ app.put("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
       guru_id,
       mata_pelajaran_id,
       kelas_id,
-      hari,
-      jam_mulai,
-      jam_selesai,
-      semester,
-      tahun_ajaran
+      hari_id,
+      jam_pelajaran_id,
+      semester_id,
+      tahun_ajaran,
     } = req.body;
 
-    // Validasi jam
-    if (jam_mulai >= jam_selesai) {
-      return res.status(400).json({ error: "Jam mulai harus sebelum jam selesai" });
-    }
-
     const connection = await getConnection();
-    
-    // Cek konflik jadwal (kecuali dengan dirinya sendiri)
-    const [konflik] = await connection.execute(
-      `SELECT * FROM jadwal_mengajar 
-       WHERE id != ? AND guru_id = ? AND hari = ? AND semester = ? AND tahun_ajaran = ?
-       AND ((jam_mulai <= ? AND jam_selesai > ?) OR (jam_mulai < ? AND jam_selesai >= ?))`,
-      [id, guru_id, hari, semester, tahun_ajaran, jam_selesai, jam_mulai, jam_selesai, jam_mulai]
+
+    // Cek konflik jadwal - guru (kecuali dengan dirinya sendiri)
+    const [konflikGuru] = await connection.execute(
+      `SELECT jm.*, u.nama as guru_nama, jp.jam_ke 
+       FROM jadwal_mengajar jm
+       JOIN users u ON jm.guru_id = u.id
+       JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+       WHERE jm.id != ? AND jm.guru_id = ? AND jm.hari_id = ? AND jm.semester_id = ? AND jm.tahun_ajaran = ? AND jm.jam_pelajaran_id = ?`,
+      [id, guru_id, hari_id, semester_id, tahun_ajaran, jam_pelajaran_id]
     );
 
-    if (konflik.length > 0) {
+    if (konflikGuru.length > 0) {
       await connection.end();
-      return res.status(400).json({ error: "Guru memiliki jadwal yang bertabrakan" });
+      return res.status(400).json({
+        error: `Guru sudah memiliki jadwal di jam ke-${konflikGuru[0].jam_ke} pada hari yang sama`,
+      });
+    }
+
+    // Cek konflik jadwal - kelas (kecuali dengan dirinya sendiri)
+    const [konflikKelas] = await connection.execute(
+      `SELECT jm.*, k.nama as kelas_nama, jp.jam_ke 
+       FROM jadwal_mengajar jm
+       JOIN kelas k ON jm.kelas_id = k.id
+       JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+       WHERE jm.id != ? AND jm.kelas_id = ? AND jm.hari_id = ? AND jm.semester_id = ? AND jm.tahun_ajaran = ? AND jm.jam_pelajaran_id = ?`,
+      [id, kelas_id, hari_id, semester_id, tahun_ajaran, jam_pelajaran_id]
+    );
+
+    if (konflikKelas.length > 0) {
+      await connection.end();
+      return res.status(400).json({
+        error: `Kelas sudah memiliki jadwal di jam ke-${konflikKelas[0].jam_ke} pada hari yang sama`,
+      });
     }
 
     await connection.execute(
-      "UPDATE jadwal_mengajar SET guru_id = ?, mata_pelajaran_id = ?, kelas_id = ?, hari = ?, jam_mulai = ?, jam_selesai = ?, semester = ?, tahun_ajaran = ? WHERE id = ?",
-      [guru_id, mata_pelajaran_id, kelas_id, hari, jam_mulai, jam_selesai, semester, tahun_ajaran, id]
+      "UPDATE jadwal_mengajar SET guru_id = ?, mata_pelajaran_id = ?, kelas_id = ?, hari_id = ?, jam_pelajaran_id = ?, semester_id = ?, tahun_ajaran = ? WHERE id = ?",
+      [
+        guru_id,
+        mata_pelajaran_id,
+        kelas_id,
+        hari_id,
+        jam_pelajaran_id,
+        semester_id,
+        tahun_ajaran,
+        id,
+      ]
     );
-    
+
     await connection.end();
 
     console.log("Jadwal mengajar berhasil diupdate:", id);
@@ -1582,6 +1721,360 @@ app.delete("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Gagal menghapus jadwal mengajar" });
   }
 });
+
+// Endpoint untuk mendeteksi jadwal yang bentrok
+app.get(
+  "/api/jadwal-mengajar/conflicts",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const {
+        hari_id,
+        kelas_id,
+        semester_id,
+        tahun_ajaran,
+        jam_pelajaran_id,
+        exclude_id,
+      } = req.query;
+
+      console.log("Mengecek jadwal bentrok:", req.query);
+
+      if (
+        !hari_id ||
+        !kelas_id ||
+        !semester_id ||
+        !tahun_ajaran ||
+        !jam_pelajaran_id
+      ) {
+        return res.status(400).json({ error: "Parameter tidak lengkap" });
+      }
+
+      let query = `
+      SELECT jm.*, 
+        u.nama as guru_nama,
+        mp.nama as mata_pelajaran_nama,
+        k.nama as kelas_nama,
+        h.nama as hari_nama,
+        jp.jam_ke,
+        jp.jam_mulai,
+        jp.jam_selesai
+      FROM jadwal_mengajar jm
+      JOIN users u ON jm.guru_id = u.id
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
+      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN hari h ON jm.hari_id = h.id
+      JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+      WHERE jm.hari_id = ? 
+        AND jm.kelas_id = ? 
+        AND jm.semester_id = ? 
+        AND jm.tahun_ajaran = ? 
+        AND jm.jam_pelajaran_id = ?
+    `;
+
+      let params = [
+        hari_id,
+        kelas_id,
+        semester_id,
+        tahun_ajaran,
+        jam_pelajaran_id,
+      ];
+
+      if (exclude_id) {
+        query += " AND jm.id != ?";
+        params.push(exclude_id);
+      }
+
+      const connection = await getConnection();
+      const [conflicts] = await connection.execute(query, params);
+      await connection.end();
+
+      console.log("Jadwal bentrok ditemukan:", conflicts.length);
+      res.json(conflicts);
+    } catch (error) {
+      console.error("ERROR CHECK CONFLICTS:", error.message);
+      res.status(500).json({ error: "Gagal memeriksa jadwal bentrok" });
+    }
+  }
+);
+
+// Get Jadwal Mengajar by Guru ID
+app.get(
+  "/api/jadwal-mengajar/guru/:guruId",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { guruId } = req.params;
+      const { semester_id, tahun_ajaran, hari_id } = req.query;
+
+      console.log("Mengambil jadwal mengajar untuk guru:", guruId);
+
+      let query = `
+      SELECT jm.*, 
+        u.nama as guru_nama,
+        mp.nama as mata_pelajaran_nama,
+        k.nama as kelas_nama,
+        h.nama as hari_nama,
+        h.urutan as hari_urutan,
+        s.nama as semester_nama,
+        jp.jam_ke,
+        jp.jam_mulai,
+        jp.jam_selesai
+      FROM jadwal_mengajar jm
+      JOIN users u ON jm.guru_id = u.id
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
+      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN hari h ON jm.hari_id = h.id
+      JOIN semester s ON jm.semester_id = s.id
+      JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+      WHERE jm.guru_id = ?
+    `;
+
+      let params = [guruId];
+
+      if (semester_id) {
+        query += " AND jm.semester_id = ?";
+        params.push(semester_id);
+      }
+
+      if (tahun_ajaran) {
+        query += " AND jm.tahun_ajaran = ?";
+        params.push(tahun_ajaran);
+      }
+
+      if (hari_id) {
+        query += " AND jm.hari_id = ?";
+        params.push(hari_id);
+      }
+
+      query += " ORDER BY h.urutan, jp.jam_ke";
+
+      const connection = await getConnection();
+      const [jadwal] = await connection.execute(query, params);
+      await connection.end();
+
+      console.log("Berhasil mengambil jadwal guru, jumlah:", jadwal.length);
+      res.json(jadwal);
+    } catch (error) {
+      console.error("ERROR GET JADWAL MENGAJAR BY GURU:", error.message);
+      res.status(500).json({ error: "Gagal mengambil jadwal mengajar guru" });
+    }
+  }
+);
+
+// Endpoint untuk debug - cek data jadwal berdasarkan guru ID
+app.get(
+  "/api/debug/jadwal-guru/:guruId",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { guruId } = req.params;
+      console.log("Debug jadwal untuk guru:", guruId);
+
+      const connection = await getConnection();
+
+      // Query untuk melihat semua jadwal guru tertentu
+      const [jadwal] = await connection.execute(
+        `SELECT jm.*, u.nama as guru_nama 
+       FROM jadwal_mengajar jm 
+       JOIN users u ON jm.guru_id = u.id 
+       WHERE jm.guru_id = ?`,
+        [guruId]
+      );
+
+      // Query untuk melihat data user
+      const [user] = await connection.execute(
+        "SELECT * FROM users WHERE id = ?",
+        [guruId]
+      );
+
+      await connection.end();
+
+      console.log("Data jadwal ditemukan:", jadwal.length);
+      console.log("Data user:", user.length > 0 ? user[0] : "Tidak ditemukan");
+
+      res.json({
+        guru: user[0] || null,
+        jadwal: jadwal,
+        total_jadwal: jadwal.length,
+      });
+    } catch (error) {
+      console.error("ERROR DEBUG JADWAL GURU:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// PERBAIKAN: Endpoint current dengan filter yang benar
+app.get("/api/jadwal-mengajar/current", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { semester_id, tahun_ajaran, hari_id } = req.query;
+
+    console.log("Mengambil jadwal dengan filter:", {
+      userId,
+      semester_id,
+      tahun_ajaran,
+      hari_id,
+    });
+
+    let query = `
+      SELECT jm.*, 
+        u.nama as guru_nama,
+        mp.nama as mata_pelajaran_nama,
+        k.nama as kelas_nama,
+        h.nama as hari_nama,
+        h.urutan as hari_urutan,
+        s.nama as semester_nama,
+        jp.jam_ke,
+        jp.jam_mulai,
+        jp.jam_selesai
+      FROM jadwal_mengajar jm
+      JOIN users u ON jm.guru_id = u.id
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
+      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN hari h ON jm.hari_id = h.id
+      JOIN semester s ON jm.semester_id = s.id
+      JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+      WHERE jm.guru_id = ?
+    `;
+
+    let params = [userId];
+
+    // PERBAIKAN: Filter semester - handle berbagai format
+    if (semester_id) {
+      // Handle jika semester_id adalah angka (1,2) atau string (ganjil, genap)
+      if (semester_id === "1" || semester_id === "2") {
+        query += " AND jm.semester_id = ?";
+        params.push(semester_id);
+      } else if (semester_id.toLowerCase().includes("ganjil")) {
+        query +=
+          " AND (jm.semester_id = '1' OR jm.semester_id = 'ganjil' OR s.nama LIKE '%ganjil%')";
+      } else if (semester_id.toLowerCase().includes("genap")) {
+        query +=
+          " AND (jm.semester_id = '2' OR jm.semester_id = 'genap' OR s.nama LIKE '%genap%')";
+      } else {
+        query += " AND (jm.semester_id = ? OR s.nama LIKE ?)";
+        params.push(semester_id, `%${semester_id}%`);
+      }
+    }
+
+    // PERBAIKAN: Filter tahun ajaran
+    if (tahun_ajaran) {
+      query += " AND jm.tahun_ajaran = ?";
+      params.push(tahun_ajaran);
+    }
+
+    // PERBAIKAN: Filter hari - handle berbagai format
+    if (hari_id) {
+      // Handle jika hari_id adalah angka (1,2,3...) atau nama hari
+      if (!isNaN(hari_id)) {
+        query += " AND jm.hari_id = ?";
+        params.push(hari_id);
+      } else {
+        // Jika nama hari, cari di tabel hari
+        query += " AND (h.nama = ? OR h.id = ?)";
+        params.push(hari_id, hari_id);
+      }
+    }
+
+    query += " ORDER BY h.urutan, jp.jam_ke";
+
+    console.log("Executing query:", query);
+    console.log("With params:", params);
+
+    const connection = await getConnection();
+    const [jadwal] = await connection.execute(query, params);
+    await connection.end();
+
+    console.log("Jadwal ditemukan setelah filter:", jadwal.length);
+
+    res.json(jadwal);
+  } catch (error) {
+    console.error("ERROR GET JADWAL MENGAJAR CURRENT:", error.message);
+    res.status(500).json({ error: "Gagal mengambil jadwal mengajar" });
+  }
+});
+
+// Endpoint alternatif untuk filter yang lebih fleksibel
+app.get(
+  "/api/jadwal-mengajar/filtered",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { hari, semester, tahun_ajaran } = req.query;
+
+      console.log("Filtered request:", {
+        userId,
+        hari,
+        semester,
+        tahun_ajaran,
+      });
+
+      let query = `
+      SELECT jm.*, 
+        u.nama as guru_nama,
+        mp.nama as mata_pelajaran_nama,
+        k.nama as kelas_nama,
+        h.nama as hari_nama,
+        h.urutan as hari_urutan,
+        s.nama as semester_nama,
+        jp.jam_ke,
+        jp.jam_mulai,
+        jp.jam_selesai
+      FROM jadwal_mengajar jm
+      JOIN users u ON jm.guru_id = u.id
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
+      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN hari h ON jm.hari_id = h.id
+      JOIN semester s ON jm.semester_id = s.id
+      JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
+      WHERE jm.guru_id = ?
+    `;
+
+      let params = [userId];
+
+      // Filter hari berdasarkan nama
+      if (hari && hari !== "Semua Hari") {
+        query += " AND h.nama = ?";
+        params.push(hari);
+      }
+
+      // Filter semester berdasarkan nama
+      if (semester && semester !== "Semua Semester") {
+        if (semester === "Ganjil" || semester === "1") {
+          query += " AND (s.nama LIKE '%ganjil%' OR jm.semester_id = '1')";
+        } else if (semester === "Genap" || semester === "2") {
+          query += " AND (s.nama LIKE '%genap%' OR jm.semester_id = '2')";
+        } else {
+          query += " AND s.nama LIKE ?";
+          params.push(`%${semester}%`);
+        }
+      }
+
+      // Filter tahun ajaran
+      if (tahun_ajaran) {
+        query += " AND jm.tahun_ajaran = ?";
+        params.push(tahun_ajaran);
+      }
+
+      query += " ORDER BY h.urutan, jp.jam_ke";
+
+      console.log("Filtered query:", query);
+      console.log("Filtered params:", params);
+
+      const connection = await getConnection();
+      const [jadwal] = await connection.execute(query, params);
+      await connection.end();
+
+      console.log("Filtered jadwal found:", jadwal.length);
+      res.json(jadwal);
+    } catch (error) {
+      console.error("ERROR FILTERED JADWAL:", error.message);
+      res.status(500).json({ error: "Gagal mengambil jadwal terfilter" });
+    }
+  }
+);
 
 // Endpoint untuk mengecek koneksi database
 app.get("/api/health", async (req, res) => {
@@ -1639,7 +2132,7 @@ app.use((error, req, res, next) => {
 // }
 
 // buatHash("password123");
-const PORT = process.env.PORT ;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server berjalan di port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
