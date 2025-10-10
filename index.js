@@ -118,7 +118,6 @@ app.use((req, res, next) => {
   next();
 });
 
-
 // Routes
 
 // Login
@@ -404,7 +403,6 @@ app.get("/api/siswa/kelas/:kelasId", authenticateToken, async (req, res) => {
   }
 });
 
-
 // Modifikasi endpoint POST siswa dengan transaction yang benar
 app.post("/api/siswa", authenticateToken, async (req, res) => {
   let connection;
@@ -421,13 +419,13 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       no_telepon,
       email_wali,
     } = req.body;
-    
+
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString().slice(0, 19).replace("T", " ");
     const updatedAt = createdAt;
 
     connection = await getConnection();
-    
+
     // Mulai transaction
     await connection.beginTransaction();
 
@@ -455,29 +453,29 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       // 2. Buat user wali jika email_wali disediakan
       if (email_wali && nama_wali) {
         console.log("Membuat user wali dengan email:", email_wali);
-        
+
         // Cek apakah email sudah terdaftar
         const [existingUsers] = await connection.execute(
           "SELECT id FROM users WHERE email = ?",
           [email_wali]
         );
-        
+
         if (existingUsers.length > 0) {
           await connection.rollback();
-          return res.status(400).json({ 
-            error: `Email wali '${email_wali}' sudah terdaftar` 
+          return res.status(400).json({
+            error: `Email wali '${email_wali}' sudah terdaftar`,
           });
         }
-        
+
         const waliId = crypto.randomUUID();
         const password = "password123";
         const hashedPassword = await bcrypt.hash(password, 10);
-        
+
         await connection.execute(
           'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
           [waliId, nama_wali, email_wali, hashedPassword, id]
         );
-        
+
         console.log("User wali berhasil dibuat dengan ID:", waliId);
       }
 
@@ -485,19 +483,19 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       await connection.commit();
       console.log("Transaction committed successfully");
 
-      res.json({ 
-        message: "Siswa berhasil ditambahkan", 
+      res.json({
+        message: "Siswa berhasil ditambahkan",
         id,
-        info: email_wali ? "User wali berhasil dibuat dengan password: password123" : "User wali tidak dibuat (email tidak disediakan)"
+        info: email_wali
+          ? "User wali berhasil dibuat dengan password: password123"
+          : "User wali tidak dibuat (email tidak disediakan)",
       });
-      
     } catch (transactionError) {
       // Rollback jika ada error dalam transaction
       await connection.rollback();
       console.error("Transaction error:", transactionError.message);
       throw transactionError;
     }
-    
   } catch (error) {
     console.error("ERROR POST SISWA:", error.message);
     console.error("SQL Error code:", error.code);
@@ -507,9 +505,9 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "NIS sudah terdaftar" });
     }
 
-    res.status(500).json({ 
+    res.status(500).json({
       error: "Gagal menambah siswa: " + error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      details: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   } finally {
     // Pastikan koneksi ditutup
@@ -2943,30 +2941,41 @@ const upload = multer({
 });
 
 // Endpoint untuk upload file
-app.post(
-  "/api/upload/rpp",
-  authenticateToken,
-  upload.single("file"),
-  (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ error: "Tidak ada file yang diupload" });
-      }
+// Di index.js backend - tambahkan endpoint base64
+app.post("/api/upload/rpp-base64", authenticateToken, async (req, res) => {
+  try {
+    const { file_name, file_data, mime_type } = req.body;
 
-      const fileUrl = `/uploads/rpp/${req.file.filename}`;
-
-      res.json({
-        message: "File berhasil diupload",
-        file_path: fileUrl,
-        file_name: req.file.originalname,
-        file_size: req.file.size,
-      });
-    } catch (error) {
-      console.error("ERROR UPLOAD FILE:", error.message);
-      res.status(500).json({ error: "Gagal mengupload file" });
+    if (!file_data || !file_name) {
+      return res.status(400).json({ error: "File data dan nama diperlukan" });
     }
+
+    // Decode base64
+    const buffer = Buffer.from(file_data, "base64");
+
+    // Simpan file
+    const uploadDir = path.join(__dirname, "uploads/rpp");
+    require("fs").mkdirSync(uploadDir, { recursive: true });
+
+    const timestamp = Date.now();
+    const fileName = `${timestamp}-${file_name}`;
+    const filePath = path.join(uploadDir, fileName);
+
+    require("fs").writeFileSync(filePath, buffer);
+
+    const fileUrl = `/uploads/rpp/${fileName}`;
+
+    res.json({
+      message: "File berhasil diupload",
+      file_path: fileUrl,
+      file_name: file_name,
+      file_size: buffer.length,
+    });
+  } catch (error) {
+    console.error("ERROR UPLOAD BASE64:", error.message);
+    res.status(500).json({ error: "Gagal mengupload file" });
   }
-);
+});
 
 // Get kegiatan by guru
 app.get("/api/kegiatan/guru/:guruId", authenticateToken, async (req, res) => {
