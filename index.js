@@ -4,6 +4,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const crypto = require("crypto");
+const multer = require("multer");
+const path = require("path");
 
 const app = express();
 app.use(express.json());
@@ -54,6 +56,82 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+// Konfigurasi storage untuk multer - PERBAIKI INI
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, "uploads/rpp");
+    // Pastikan folder ada
+    const fs = require("fs");
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+      console.log("Created upload directory:", uploadDir);
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Format: timestamp-namaFile-asli
+    const timestamp = Date.now();
+    const originalName = file.originalname;
+    // Bersihkan nama file dari karakter khusus
+    const cleanName = originalName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    const fileName = `${timestamp}-${cleanName}`;
+    console.log("Generated filename:", fileName);
+    cb(null, fileName);
+  },
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max file size
+  },
+  fileFilter: function (req, file, cb) {
+    console.log("File filter checking:", file.mimetype, file.originalname);
+    
+    // Hanya izinkan file Word dan PDF
+    const allowedTypes = [
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/pdf",
+    ];
+
+    const allowedExtensions = ['.pdf', '.doc', '.docx'];
+    const fileExtension = path.extname(file.originalname).toLowerCase();
+
+    if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(fileExtension)) {
+      cb(null, true);
+    } else {
+      console.log("File type rejected:", file.mimetype, fileExtension);
+      cb(
+        new Error("Hanya file Word (.doc, .docx) dan PDF yang diizinkan"),
+        false
+      );
+    }
+  },
+});
+
+// Error handling untuk multer
+const uploadMiddleware = (req, res, next) => {
+  upload.single('file')(req, res, function (err) {
+    if (err instanceof multer.MulterError) {
+      // A Multer error occurred when uploading.
+      console.error("Multer Error:", err);
+      return res.status(400).json({ 
+        error: `Upload error: ${err.message}` 
+      });
+    } else if (err) {
+      // An unknown error occurred.
+      console.error("Unknown Upload Error:", err);
+      return res.status(500).json({ 
+        error: `Upload failed: ${err.message}` 
+      });
+    }
+    // Everything went fine.
+    next();
+  });
+};
+
 
 // Di bagian endpoint siswa, tambahkan fungsi untuk membuat user wali
 async function createWaliUser(email, namaWali, siswaId) {
@@ -2898,75 +2976,84 @@ app.delete("/api/rpp/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// File upload endpoint
-const multer = require("multer");
-const path = require("path");
 
 // Konfigurasi storage untuk multer
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, "uploads/rpp");
-    require("fs").mkdirSync(uploadDir, { recursive: true });
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    // Format: timestamp-namaFile-asli
-    const timestamp = Date.now();
-    const originalName = file.originalname;
-    const fileName = `${timestamp}-${originalName}`;
-    cb(null, fileName);
-  },
-});
+// const storage = multer.diskStorage({
+//   destination: function (req, file, cb) {
+//     const uploadDir = path.join(__dirname, "uploads/rpp");
+//     require("fs").mkdirSync(uploadDir, { recursive: true });
+//     cb(null, uploadDir);
+//   },
+//   filename: function (req, file, cb) {
+//     // Format: timestamp-namaFile-asli
+//     const timestamp = Date.now();
+//     const originalName = file.originalname;
+//     const fileName = `${timestamp}-${originalName}`;
+//     cb(null, fileName);
+//   },
+// });
 
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB max file size
-  },
-  fileFilter: function (req, file, cb) {
-    // Hanya izinkan file Word dan PDF
-    const allowedTypes = [
-      "application/msword",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      "application/pdf",
-    ];
+// const upload = multer({
+//   storage: storage,
+//   limits: {
+//     fileSize: 10 * 1024 * 1024, // 10MB max file size
+//   },
+//   fileFilter: function (req, file, cb) {
+//     // Hanya izinkan file Word dan PDF
+//     const allowedTypes = [
+//       "application/msword",
+//       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+//       "application/pdf",
+//     ];
 
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(
-        new Error("Hanya file Word (.doc, .docx) dan PDF yang diizinkan"),
-        false
-      );
-    }
-  },
-});
+//     if (allowedTypes.includes(file.mimetype)) {
+//       cb(null, true);
+//     } else {
+//       cb(
+//         new Error("Hanya file Word (.doc, .docx) dan PDF yang diizinkan"),
+//         false
+//       );
+//     }
+//   },
+// });
 
 // Endpoint untuk upload file
-app.post(
-  "/api/upload/rpp",
-  authenticateToken,
-  upload.single("file"),
-  (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ error: "Tidak ada file yang diupload" });
-      }
-
-      const fileUrl = `/uploads/rpp/${req.file.filename}`;
-
-      res.json({
-        message: "File berhasil diupload",
-        file_path: fileUrl,
-        file_name: req.file.originalname,
-        file_size: req.file.size,
-      });
-    } catch (error) {
-      console.error("ERROR UPLOAD FILE:", error.message);
-      res.status(500).json({ error: "Gagal mengupload file" });
+app.post("/api/upload/rpp", authenticateToken, uploadMiddleware, async (req, res) => {
+  try {
+    console.log("Upload RPP endpoint hit");
+    
+    if (!req.file) {
+      console.log("No file received");
+      return res.status(400).json({ error: "Tidak ada file yang diupload" });
     }
+
+    console.log("File received:", {
+      originalname: req.file.originalname,
+      filename: req.file.filename,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+      path: req.file.path
+    });
+
+    const fileUrl = `/uploads/rpp/${req.file.filename}`;
+
+    console.log("File uploaded successfully:", fileUrl);
+    
+    res.json({
+      message: "File berhasil diupload",
+      file_path: fileUrl,
+      file_name: req.file.originalname,
+      file_size: req.file.size,
+    });
+  } catch (error) {
+    console.error("ERROR UPLOAD FILE:", error.message);
+    console.error("Error stack:", error.stack);
+    res.status(500).json({ 
+      error: "Gagal mengupload file",
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
-);
+});
 
 // Get kegiatan by guru
 app.get("/api/kegiatan/guru/:guruId", authenticateToken, async (req, res) => {
