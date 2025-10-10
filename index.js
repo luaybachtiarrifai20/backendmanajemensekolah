@@ -55,11 +55,69 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Di bagian endpoint siswa, tambahkan fungsi untuk membuat user wali
+async function createWaliUser(email, namaWali, siswaId) {
+  try {
+    console.log("Membuat user wali untuk siswa:", siswaId);
+
+    const connection = await getConnection();
+
+    // Cek apakah email sudah terdaftar
+    const [existingUsers] = await connection.execute(
+      "SELECT id FROM users WHERE email = ?",
+      [email]
+    );
+
+    if (existingUsers.length > 0) {
+      await connection.end();
+      console.log("Email sudah terdaftar:", email);
+      return { success: false, error: "Email sudah terdaftar" };
+    }
+
+    const id = crypto.randomUUID();
+    const password = "password123";
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    await connection.execute(
+      'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
+      [id, namaWali, email, hashedPassword, siswaId]
+    );
+
+    await connection.end();
+
+    console.log("User wali berhasil dibuat:", id);
+    return { success: true, id };
+  } catch (error) {
+    console.error("ERROR CREATE WALI USER:", error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+async function deleteWaliUser(siswaId) {
+  try {
+    console.log("Menghapus user wali untuk siswa:", siswaId);
+
+    const connection = await getConnection();
+    await connection.execute(
+      "DELETE FROM users WHERE siswa_id = ? AND role = 'wali'",
+      [siswaId]
+    );
+    await connection.end();
+
+    console.log("User wali berhasil dihapus");
+    return { success: true };
+  } catch (error) {
+    console.error("ERROR DELETE WALI USER:", error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 // Middleware untuk logging request
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
   next();
 });
+
 
 // Routes
 
@@ -162,6 +220,87 @@ app.post("/api/kelas", authenticateToken, async (req, res) => {
   }
 });
 
+// Update Kelas
+app.put("/api/kelas/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Update kelas:", id, req.body);
+    const { nama, wali_kelas_id } = req.body;
+
+    const connection = await getConnection();
+    await connection.execute(
+      "UPDATE kelas SET nama = ?, wali_kelas_id = ? WHERE id = ?",
+      [nama, wali_kelas_id, id]
+    );
+    await connection.end();
+
+    console.log("Kelas berhasil diupdate:", id);
+    res.json({ message: "Kelas berhasil diupdate" });
+  } catch (error) {
+    console.error("ERROR PUT KELAS:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal mengupdate kelas" });
+  }
+});
+
+// Delete Kelas
+app.delete("/api/kelas/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Delete kelas:", id);
+
+    const connection = await getConnection();
+
+    // Cek jika kelas memiliki siswa
+    const [siswa] = await connection.execute(
+      "SELECT id FROM siswa WHERE kelas_id = ?",
+      [id]
+    );
+
+    if (siswa.length > 0) {
+      await connection.end();
+      return res.status(400).json({
+        error: "Kelas tidak dapat dihapus karena masih memiliki siswa",
+      });
+    }
+
+    await connection.execute("DELETE FROM kelas WHERE id = ?", [id]);
+    await connection.end();
+
+    console.log("Kelas berhasil dihapus:", id);
+    res.json({ message: "Kelas berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR DELETE KELAS:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal menghapus kelas" });
+  }
+});
+
+// Get Kelas by ID
+app.get("/api/kelas/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Mengambil data kelas by ID:", id);
+
+    const connection = await getConnection();
+    const [kelas] = await connection.execute(
+      "SELECT k.*, u.nama as wali_kelas_nama FROM kelas k LEFT JOIN users u ON k.wali_kelas_id = u.id WHERE k.id = ?",
+      [id]
+    );
+    await connection.end();
+
+    if (kelas.length === 0) {
+      return res.status(404).json({ error: "Kelas tidak ditemukan" });
+    }
+
+    console.log("Berhasil mengambil data kelas:", id);
+    res.json(kelas[0]);
+  } catch (error) {
+    console.error("ERROR GET KELAS BY ID:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data kelas" });
+  }
+});
+
 // Kelola Guru
 app.get("/api/guru", authenticateToken, async (req, res) => {
   try {
@@ -185,6 +324,42 @@ app.get("/api/guru", authenticateToken, async (req, res) => {
   }
 });
 
+// Delete Guru
+app.delete("/api/guru/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Delete guru:", id);
+
+    const connection = await getConnection();
+
+    // Cek jika guru adalah wali kelas
+    const [waliKelas] = await connection.execute(
+      "SELECT id FROM kelas WHERE wali_kelas_id = ?",
+      [id]
+    );
+
+    if (waliKelas.length > 0) {
+      await connection.end();
+      return res.status(400).json({
+        error: "Guru tidak dapat dihapus karena masih menjadi wali kelas",
+      });
+    }
+
+    await connection.execute(
+      "DELETE FROM users WHERE id = ? AND role = 'guru'",
+      [id]
+    );
+    await connection.end();
+
+    console.log("Guru berhasil dihapus:", id);
+    res.json({ message: "Guru berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR DELETE GURU:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal menghapus guru" });
+  }
+});
+
 // Kelola Siswa
 app.get("/api/siswa", authenticateToken, async (req, res) => {
   try {
@@ -203,8 +378,36 @@ app.get("/api/siswa", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Gagal mengambil data siswa" });
   }
 });
+// Get Siswa by Kelas ID
+app.get("/api/siswa/kelas/:kelasId", authenticateToken, async (req, res) => {
+  try {
+    const { kelasId } = req.params;
+    console.log("Mengambil data siswa by kelas ID:", kelasId);
 
+    const connection = await getConnection();
+    const [siswa] = await connection.execute(
+      "SELECT s.*, k.nama as kelas_nama FROM siswa s LEFT JOIN kelas k ON s.kelas_id = k.id WHERE s.kelas_id = ? ORDER BY s.nama",
+      [kelasId]
+    );
+    await connection.end();
+
+    console.log(
+      "Berhasil mengambil data siswa untuk kelas:",
+      kelasId,
+      "jumlah:",
+      siswa.length
+    );
+    res.json(siswa);
+  } catch (error) {
+    console.error("ERROR GET SISWA BY KELAS:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data siswa" });
+  }
+});
+
+
+// Modifikasi endpoint POST siswa dengan transaction yang benar
 app.post("/api/siswa", authenticateToken, async (req, res) => {
+  let connection;
   try {
     console.log("Menambah siswa baru:", req.body);
     const {
@@ -216,45 +419,107 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       jenis_kelamin,
       nama_wali,
       no_telepon,
+      email_wali,
     } = req.body;
+    
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString().slice(0, 19).replace("T", " ");
     const updatedAt = createdAt;
 
-    const connection = await getConnection();
-    await connection.execute(
-      "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [
-        id,
-        nis,
-        nama,
-        kelas_id,
-        alamat,
-        tanggal_lahir,
-        jenis_kelamin,
-        nama_wali,
-        no_telepon,
-        createdAt,
-        updatedAt,
-      ]
-    );
-    await connection.end();
+    connection = await getConnection();
+    
+    // Mulai transaction
+    await connection.beginTransaction();
 
-    console.log("Siswa berhasil ditambahkan:", nis);
-    res.json({ message: "Siswa berhasil ditambahkan", id });
+    try {
+      // 1. Insert siswa terlebih dahulu
+      await connection.execute(
+        "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          id,
+          nis,
+          nama,
+          kelas_id,
+          alamat,
+          tanggal_lahir,
+          jenis_kelamin,
+          nama_wali,
+          no_telepon,
+          createdAt,
+          updatedAt,
+        ]
+      );
+
+      console.log("Siswa berhasil dimasukkan ke database dengan ID:", id);
+
+      // 2. Buat user wali jika email_wali disediakan
+      if (email_wali && nama_wali) {
+        console.log("Membuat user wali dengan email:", email_wali);
+        
+        // Cek apakah email sudah terdaftar
+        const [existingUsers] = await connection.execute(
+          "SELECT id FROM users WHERE email = ?",
+          [email_wali]
+        );
+        
+        if (existingUsers.length > 0) {
+          await connection.rollback();
+          return res.status(400).json({ 
+            error: `Email wali '${email_wali}' sudah terdaftar` 
+          });
+        }
+        
+        const waliId = crypto.randomUUID();
+        const password = "password123";
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        await connection.execute(
+          'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
+          [waliId, nama_wali, email_wali, hashedPassword, id]
+        );
+        
+        console.log("User wali berhasil dibuat dengan ID:", waliId);
+      }
+
+      // Commit transaction
+      await connection.commit();
+      console.log("Transaction committed successfully");
+
+      res.json({ 
+        message: "Siswa berhasil ditambahkan", 
+        id,
+        info: email_wali ? "User wali berhasil dibuat dengan password: password123" : "User wali tidak dibuat (email tidak disediakan)"
+      });
+      
+    } catch (transactionError) {
+      // Rollback jika ada error dalam transaction
+      await connection.rollback();
+      console.error("Transaction error:", transactionError.message);
+      throw transactionError;
+    }
+    
   } catch (error) {
     console.error("ERROR POST SISWA:", error.message);
     console.error("SQL Error code:", error.code);
+    console.error("Error stack:", error.stack);
 
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(400).json({ error: "NIS sudah terdaftar" });
     }
 
-    res.status(500).json({ error: "Gagal menambah siswa" });
+    res.status(500).json({ 
+      error: "Gagal menambah siswa: " + error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  } finally {
+    // Pastikan koneksi ditutup
+    if (connection) {
+      await connection.end();
+    }
   }
 });
 
-// Kelola Siswa - Update Siswa
+// Modifikasi endpoint PUT siswa
 app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -268,29 +533,91 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
       jenis_kelamin,
       nama_wali,
       no_telepon,
+      email_wali, // Tambahkan field email_wali
     } = req.body;
     const updatedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
 
     const connection = await getConnection();
-    await connection.execute(
-      "UPDATE siswa SET nis = ?, nama = ?, kelas_id = ?, alamat = ?, tanggal_lahir = ?, jenis_kelamin = ?, nama_wali = ?, no_telepon = ?, updated_at = ? WHERE id = ?",
-      [
-        nis,
-        nama,
-        kelas_id,
-        alamat,
-        tanggal_lahir,
-        jenis_kelamin,
-        nama_wali,
-        no_telepon,
-        updatedAt,
-        id,
-      ]
-    );
-    await connection.end();
 
-    console.log("Siswa berhasil diupdate:", id);
-    res.json({ message: "Siswa berhasil diupdate" });
+    // Mulai transaction
+    await connection.beginTransaction();
+
+    try {
+      // Update siswa
+      await connection.execute(
+        "UPDATE siswa SET nis = ?, nama = ?, kelas_id = ?, alamat = ?, tanggal_lahir = ?, jenis_kelamin = ?, nama_wali = ?, no_telepon = ?, updated_at = ? WHERE id = ?",
+        [
+          nis,
+          nama,
+          kelas_id,
+          alamat,
+          tanggal_lahir,
+          jenis_kelamin,
+          nama_wali,
+          no_telepon,
+          updatedAt,
+          id,
+        ]
+      );
+
+      // Cek apakah sudah ada user wali untuk siswa ini
+      const [existingWali] = await connection.execute(
+        "SELECT id, email FROM users WHERE siswa_id = ? AND role = 'wali'",
+        [id]
+      );
+
+      if (email_wali && nama_wali) {
+        if (existingWali.length > 0) {
+          // Update user wali yang sudah ada
+          if (existingWali[0].email !== email_wali) {
+            // Cek jika email baru sudah digunakan
+            const [emailCheck] = await connection.execute(
+              "SELECT id FROM users WHERE email = ? AND id != ?",
+              [email_wali, existingWali[0].id]
+            );
+
+            if (emailCheck.length > 0) {
+              await connection.rollback();
+              await connection.end();
+              return res
+                .status(400)
+                .json({ error: "Email wali sudah digunakan" });
+            }
+          }
+
+          await connection.execute(
+            "UPDATE users SET nama = ?, email = ? WHERE siswa_id = ? AND role = 'wali'",
+            [nama_wali, email_wali, id]
+          );
+        } else {
+          // Buat user wali baru
+          const waliResult = await createWaliUser(email_wali, nama_wali, id);
+          if (!waliResult.success) {
+            await connection.rollback();
+            await connection.end();
+            return res.status(400).json({
+              error: `Gagal membuat user wali: ${waliResult.error}`,
+            });
+          }
+        }
+      } else if (existingWali.length > 0) {
+        // Hapus user wali jika email_wali dihapus
+        await connection.execute(
+          "DELETE FROM users WHERE siswa_id = ? AND role = 'wali'",
+          [id]
+        );
+      }
+
+      // Commit transaction
+      await connection.commit();
+      await connection.end();
+
+      console.log("Siswa berhasil diupdate:", id);
+      res.json({ message: "Siswa berhasil diupdate" });
+    } catch (transactionError) {
+      await connection.rollback();
+      throw transactionError;
+    }
   } catch (error) {
     console.error("ERROR PUT SISWA:", error.message);
     console.error("SQL Error code:", error.code);
@@ -303,18 +630,37 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Kelola Siswa - Delete Siswa
+// Modifikasi endpoint DELETE siswa
 app.delete("/api/siswa/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Delete siswa:", id);
 
     const connection = await getConnection();
-    await connection.execute("DELETE FROM siswa WHERE id = ?", [id]);
-    await connection.end();
 
-    console.log("Siswa berhasil dihapus:", id);
-    res.json({ message: "Siswa berhasil dihapus" });
+    // Mulai transaction
+    await connection.beginTransaction();
+
+    try {
+      // Hapus user wali terlebih dahulu
+      await connection.execute(
+        "DELETE FROM users WHERE siswa_id = ? AND role = 'wali'",
+        [id]
+      );
+
+      // Hapus siswa
+      await connection.execute("DELETE FROM siswa WHERE id = ?", [id]);
+
+      // Commit transaction
+      await connection.commit();
+      await connection.end();
+
+      console.log("Siswa berhasil dihapus:", id);
+      res.json({ message: "Siswa berhasil dihapus" });
+    } catch (transactionError) {
+      await connection.rollback();
+      throw transactionError;
+    }
   } catch (error) {
     console.error("ERROR DELETE SISWA:", error.message);
     console.error("SQL Error code:", error.code);
@@ -635,14 +981,15 @@ app.put("/api/guru/:id", authenticateToken, async (req, res) => {
 // Kelola Absensi
 app.get("/api/absensi", authenticateToken, async (req, res) => {
   try {
-    const { guru_id, tanggal, mata_pelajaran_id } = req.query;
+    const { guru_id, tanggal, mata_pelajaran_id, siswa_id } = req.query; // Tambahkan siswa_id
     console.log("Mengambil data absensi");
 
     let query = `
-      SELECT a.*, s.nama as siswa_nama, s.nis, k.nama as kelas_nama
+      SELECT a.*, s.nama as siswa_nama, s.nis, k.nama as kelas_nama, mp.nama as mata_pelajaran_nama
       FROM absensi a
       JOIN siswa s ON a.siswa_id = s.id
       JOIN kelas k ON s.kelas_id = k.id
+      JOIN mata_pelajaran mp ON a.mata_pelajaran_id = mp.id
       WHERE 1=1
     `;
     let params = [];
@@ -662,6 +1009,11 @@ app.get("/api/absensi", authenticateToken, async (req, res) => {
       params.push(mata_pelajaran_id);
     }
 
+    if (siswa_id) {
+      query += " AND a.siswa_id = ?";
+      params.push(siswa_id);
+    }
+
     const connection = await getConnection();
     const [absensi] = await connection.execute(query, params);
     await connection.end();
@@ -674,6 +1026,35 @@ app.get("/api/absensi", authenticateToken, async (req, res) => {
   }
 });
 
+// Debug endpoint untuk cek struktur tabel absensi
+app.get("/api/debug/absensi-structure", authenticateToken, async (req, res) => {
+  try {
+    const connection = await getConnection();
+    const [structure] = await connection.execute("DESCRIBE absensi");
+    await connection.end();
+    res.json({ structure });
+  } catch (error) {
+    console.error("ERROR GET ABSENSI STRUCTURE:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get data absensi existing untuk debugging
+app.get("/api/debug/absensi-data", authenticateToken, async (req, res) => {
+  try {
+    const connection = await getConnection();
+    const [absensi] = await connection.execute(
+      "SELECT * FROM absensi LIMIT 10"
+    );
+    await connection.end();
+    res.json({ absensi });
+  } catch (error) {
+    console.error("ERROR GET ABSENSI DATA:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Perbaiki endpoint POST absensi dengan validasi lengkap
 app.post("/api/absensi", authenticateToken, async (req, res) => {
   try {
     console.log("Menambah absensi:", req.body);
@@ -685,21 +1066,114 @@ app.post("/api/absensi", authenticateToken, async (req, res) => {
       status,
       keterangan,
     } = req.body;
+
+    // Validasi data required dengan pesan yang lebih jelas
+    const missingFields = [];
+    if (!siswa_id) missingFields.push("siswa_id");
+    if (!guru_id) missingFields.push("guru_id");
+    if (!mata_pelajaran_id) missingFields.push("mata_pelajaran_id");
+    if (!tanggal) missingFields.push("tanggal");
+    if (!status) missingFields.push("status");
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        error: "Data tidak lengkap",
+        missing_fields: missingFields,
+        received_data: {
+          siswa_id: !!siswa_id,
+          guru_id: !!guru_id,
+          mata_pelajaran_id: !!mata_pelajaran_id,
+          tanggal: !!tanggal,
+          status: !!status,
+        },
+      });
+    }
+
+    // Validasi status
+    const allowedStatus = ["hadir", "terlambat", "izin", "sakit", "alpha"];
+    if (!allowedStatus.includes(status)) {
+      return res.status(400).json({
+        error: "Status tidak valid",
+        allowed: allowedStatus,
+        received: status,
+      });
+    }
+
     const id = crypto.randomUUID();
 
     const connection = await getConnection();
-    await connection.execute(
-      "INSERT INTO absensi (id, siswa_id, guru_id, mata_pelajaran_id, tanggal, status, keterangan) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [id, siswa_id, guru_id, mata_pelajaran_id, tanggal, status, keterangan]
-    );
-    await connection.end();
 
-    console.log("Absensi berhasil ditambahkan:", id);
-    res.json({ message: "Absensi berhasil ditambahkan", id });
+    // Cek apakah absensi sudah ada untuk kombinasi yang sama
+    const [existing] = await connection.execute(
+      "SELECT id FROM absensi WHERE siswa_id = ? AND mata_pelajaran_id = ? AND tanggal = ? AND guru_id = ?",
+      [siswa_id, mata_pelajaran_id, tanggal, guru_id]
+    );
+
+    if (existing.length > 0) {
+      // Update jika sudah ada
+      await connection.execute(
+        "UPDATE absensi SET status = ?, keterangan = ?, updated_at = NOW() WHERE id = ?",
+        [status, keterangan || "", existing[0].id]
+      );
+      await connection.end();
+      console.log("Absensi berhasil diupdate:", existing[0].id);
+      return res.json({
+        message: "Absensi berhasil diupdate",
+        id: existing[0].id,
+        action: "updated",
+      });
+    } else {
+      // Insert baru
+      await connection.execute(
+        "INSERT INTO absensi (id, siswa_id, guru_id, mata_pelajaran_id, tanggal, status, keterangan) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+          id,
+          siswa_id,
+          guru_id,
+          mata_pelajaran_id,
+          tanggal,
+          status,
+          keterangan || "",
+        ]
+      );
+      await connection.end();
+      console.log("Absensi berhasil ditambahkan:", id);
+      return res.json({
+        message: "Absensi berhasil ditambahkan",
+        id,
+        action: "created",
+      });
+    }
   } catch (error) {
     console.error("ERROR POST ABSENSI:", error.message);
     console.error("SQL Error code:", error.code);
-    res.status(500).json({ error: "Gagal menambah absensi" });
+    console.error("Error details:", error);
+
+    if (error.code === "ER_NO_SUCH_TABLE") {
+      return res.status(500).json({
+        error:
+          "Tabel absensi tidak ditemukan. Silakan buat tabel terlebih dahulu.",
+      });
+    }
+
+    if (error.code === "ER_BAD_NULL_ERROR") {
+      return res.status(400).json({
+        error: "Data required tidak boleh kosong",
+        details: error.message,
+      });
+    }
+
+    if (error.code === "ER_DUP_ENTRY") {
+      return res.status(400).json({
+        error:
+          "Absensi untuk siswa ini sudah ada pada tanggal dan mata pelajaran yang sama",
+      });
+    }
+
+    res.status(500).json({
+      error: "Gagal menambah absensi: " + error.message,
+      code: error.code,
+    });
   }
 });
 
@@ -786,6 +1260,90 @@ app.post("/api/nilai", authenticateToken, async (req, res) => {
     console.error("ERROR POST NILAI:", error.message);
     console.error("SQL Error code:", error.code);
     res.status(500).json({ error: "Gagal menambah nilai" });
+  }
+});
+
+// Update Nilai
+app.put("/api/nilai/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Update nilai:", id, req.body);
+    const {
+      siswa_id,
+      guru_id,
+      mata_pelajaran_id,
+      jenis,
+      nilai: nilaiValue,
+      deskripsi,
+      tanggal,
+    } = req.body;
+
+    const connection = await getConnection();
+    await connection.execute(
+      "UPDATE nilai SET siswa_id = ?, guru_id = ?, mata_pelajaran_id = ?, jenis = ?, nilai = ?, deskripsi = ?, tanggal = ? WHERE id = ?",
+      [
+        siswa_id,
+        guru_id,
+        mata_pelajaran_id,
+        jenis,
+        nilaiValue,
+        deskripsi,
+        tanggal,
+        id,
+      ]
+    );
+    await connection.end();
+
+    console.log("Nilai berhasil diupdate:", id);
+    res.json({ message: "Nilai berhasil diupdate" });
+  } catch (error) {
+    console.error("ERROR PUT NILAI:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal mengupdate nilai" });
+  }
+});
+
+// Delete Nilai
+app.delete("/api/nilai/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Delete nilai:", id);
+
+    const connection = await getConnection();
+    await connection.execute("DELETE FROM nilai WHERE id = ?", [id]);
+    await connection.end();
+
+    console.log("Nilai berhasil dihapus:", id);
+    res.json({ message: "Nilai berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR DELETE NILAI:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal menghapus nilai" });
+  }
+});
+
+// Get Nilai by ID
+app.get("/api/nilai/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Mengambil data nilai by ID:", id);
+
+    const connection = await getConnection();
+    const [nilai] = await connection.execute(
+      "SELECT n.*, s.nama as siswa_nama, s.nis, mp.nama as mata_pelajaran_nama FROM nilai n JOIN siswa s ON n.siswa_id = s.id JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id WHERE n.id = ?",
+      [id]
+    );
+    await connection.end();
+
+    if (nilai.length === 0) {
+      return res.status(404).json({ error: "Nilai tidak ditemukan" });
+    }
+
+    console.log("Berhasil mengambil data nilai:", id);
+    res.json(nilai[0]);
+  } catch (error) {
+    console.error("ERROR GET NILAI BY ID:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data nilai" });
   }
 });
 
@@ -1157,43 +1715,6 @@ app.post("/api/materi", authenticateToken, async (req, res) => {
   }
 });
 
-// Kelola RPP
-app.get("/api/rpp", authenticateToken, async (req, res) => {
-  try {
-    const { guru_id, mata_pelajaran_id } = req.query;
-    console.log("Mengambil data RPP");
-
-    let query = `
-      SELECT r.*, u.nama as guru_nama, mp.nama as mata_pelajaran_nama
-      FROM rpp r
-      JOIN users u ON r.guru_id = u.id
-      JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id
-      WHERE 1=1
-    `;
-    let params = [];
-
-    if (guru_id) {
-      query += " AND r.guru_id = ?";
-      params.push(guru_id);
-    }
-
-    if (mata_pelajaran_id) {
-      query += " AND r.mata_pelajaran_id = ?";
-      params.push(mata_pelajaran_id);
-    }
-
-    const connection = await getConnection();
-    const [rpp] = await connection.execute(query, params);
-    await connection.end();
-
-    console.log("Berhasil mengambil data RPP, jumlah:", rpp.length);
-    res.json(rpp);
-  } catch (error) {
-    console.error("ERROR GET RPP:", error.message);
-    res.status(500).json({ error: "Gagal mengambil data RPP" });
-  }
-});
-
 // Endpoint khusus untuk mata pelajaran by guru
 app.get("/api/mata-pelajaran-by-guru", authenticateToken, async (req, res) => {
   try {
@@ -1222,6 +1743,160 @@ app.get("/api/mata-pelajaran-by-guru", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("ERROR GET MATA PELAJARAN BY GURU:", error.message);
     res.status(500).json({ error: "Gagal mengambil mata pelajaran guru" });
+  }
+});
+
+// Get all Mata Pelajaran with Kelas
+app.get(
+  "/api/mata-pelajaran-with-kelas",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      console.log("Mengambil mata pelajaran dengan data kelas");
+
+      const connection = await getConnection();
+
+      const [mataPelajaran] = await connection.execute(`
+      SELECT 
+        mp.*,
+        GROUP_CONCAT(DISTINCT k.nama) as kelas_names,
+        GROUP_CONCAT(DISTINCT k.id) as kelas_ids,
+        COUNT(DISTINCT k.id) as jumlah_kelas
+      FROM mata_pelajaran mp
+      LEFT JOIN mata_pelajaran_kelas mpk ON mp.id = mpk.mata_pelajaran_id
+      LEFT JOIN kelas k ON mpk.kelas_id = k.id
+      GROUP BY mp.id
+      ORDER BY mp.nama
+    `);
+
+      await connection.end();
+
+      console.log(
+        "Mata pelajaran dengan kelas ditemukan:",
+        mataPelajaran.length
+      );
+      res.json(mataPelajaran);
+    } catch (error) {
+      console.error("ERROR GET MATA PELAJARAN WITH KELAS:", error.message);
+      res
+        .status(500)
+        .json({ error: "Gagal mengambil data mata pelajaran dengan kelas" });
+    }
+  }
+);
+
+// Get Kelas by Mata Pelajaran
+app.get("/api/kelas-by-mata-pelajaran", authenticateToken, async (req, res) => {
+  try {
+    const { mata_pelajaran_id } = req.query;
+    console.log("Mengambil kelas untuk mata pelajaran:", mata_pelajaran_id);
+
+    if (!mata_pelajaran_id) {
+      return res
+        .status(400)
+        .json({ error: "Parameter mata_pelajaran_id diperlukan" });
+    }
+
+    const connection = await getConnection();
+
+    const [kelas] = await connection.execute(
+      `SELECT k.* 
+       FROM kelas k
+       JOIN mata_pelajaran_kelas mpk ON k.id = mpk.kelas_id
+       WHERE mpk.mata_pelajaran_id = ?
+       ORDER BY k.nama`,
+      [mata_pelajaran_id]
+    );
+
+    await connection.end();
+
+    console.log("Kelas ditemukan:", kelas.length);
+    res.json(kelas);
+  } catch (error) {
+    console.error("ERROR GET KELAS BY MATA PELAJARAN:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data kelas" });
+  }
+});
+
+// Add Kelas to Mata Pelajaran
+app.post("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
+  try {
+    const { mata_pelajaran_id, kelas_id } = req.body;
+    console.log("Menambah kelas ke mata pelajaran:", {
+      mata_pelajaran_id,
+      kelas_id,
+    });
+
+    if (!mata_pelajaran_id || !kelas_id) {
+      return res
+        .status(400)
+        .json({ error: "mata_pelajaran_id dan kelas_id diperlukan" });
+    }
+
+    const id = crypto.randomUUID();
+    const connection = await getConnection();
+
+    // Check if relationship already exists
+    const [existing] = await connection.execute(
+      "SELECT * FROM mata_pelajaran_kelas WHERE mata_pelajaran_id = ? AND kelas_id = ?",
+      [mata_pelajaran_id, kelas_id]
+    );
+
+    if (existing.length > 0) {
+      await connection.end();
+      return res
+        .status(400)
+        .json({ error: "Relasi mata pelajaran-kelas sudah ada" });
+    }
+
+    await connection.execute(
+      "INSERT INTO mata_pelajaran_kelas (id, mata_pelajaran_id, kelas_id) VALUES (?, ?, ?)",
+      [id, mata_pelajaran_id, kelas_id]
+    );
+
+    await connection.end();
+
+    console.log("Relasi mata pelajaran-kelas berhasil ditambahkan:", id);
+    res.json({ message: "Relasi berhasil ditambahkan", id });
+  } catch (error) {
+    console.error("ERROR ADD MATA PELAJARAN KELAS:", error.message);
+    res
+      .status(500)
+      .json({ error: "Gagal menambah relasi mata pelajaran-kelas" });
+  }
+});
+
+// Remove Kelas from Mata Pelajaran
+app.delete("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
+  try {
+    const { mata_pelajaran_id, kelas_id } = req.query;
+    console.log("Menghapus kelas dari mata pelajaran:", {
+      mata_pelajaran_id,
+      kelas_id,
+    });
+
+    if (!mata_pelajaran_id || !kelas_id) {
+      return res
+        .status(400)
+        .json({ error: "mata_pelajaran_id dan kelas_id diperlukan" });
+    }
+
+    const connection = await getConnection();
+
+    await connection.execute(
+      "DELETE FROM mata_pelajaran_kelas WHERE mata_pelajaran_id = ? AND kelas_id = ?",
+      [mata_pelajaran_id, kelas_id]
+    );
+
+    await connection.end();
+
+    console.log("Relasi mata pelajaran-kelas berhasil dihapus");
+    res.json({ message: "Relasi berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR REMOVE MATA PELAJARAN KELAS:", error.message);
+    res
+      .status(500)
+      .json({ error: "Gagal menghapus relasi mata pelajaran-kelas" });
   }
 });
 
@@ -1331,7 +2006,7 @@ app.delete(
 );
 
 // Kelola Guru - Get all teachers with their subjects
-app.get("/api/guru", authenticateToken, async (req, res) => {
+app.get("/api/guru-matapelajaran", authenticateToken, async (req, res) => {
   try {
     console.log("Mengambil data guru");
     const connection = await getConnection();
@@ -1358,49 +2033,6 @@ app.get("/api/guru", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("ERROR GET GURU:", error.message);
     res.status(500).json({ error: "Gagal mengambil data guru" });
-  }
-});
-
-app.post("/api/rpp", authenticateToken, async (req, res) => {
-  try {
-    console.log("Menambah RPP:", req.body);
-    const {
-      guru_id,
-      mata_pelajaran_id,
-      judul,
-      tujuan_pembelajaran,
-      materi_pokok,
-      kegiatan_pembelajaran,
-      penilaian,
-      alat_media,
-      file_path,
-    } = req.body;
-    const id = crypto.randomUUID();
-
-    const connection = await getConnection();
-    await connection.execute(
-      "INSERT INTO rpp (id, guru_id, mata_pelajaran_id, judul, tujuan_pembelajaran, materi_pokok, kegiatan_pembelajaran, penilaian, alat_media, file_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [
-        id,
-        guru_id,
-        mata_pelajaran_id,
-        judul,
-        tujuan_pembelajaran,
-        materi_pokok,
-        kegiatan_pembelajaran,
-        penilaian,
-        alat_media,
-        file_path,
-      ]
-    );
-    await connection.end();
-
-    console.log("RPP berhasil ditambahkan:", id);
-    res.json({ message: "RPP berhasil ditambahkan", id });
-  } catch (error) {
-    console.error("ERROR POST RPP:", error.message);
-    console.error("SQL Error code:", error.code);
-    res.status(500).json({ error: "Gagal menambah RPP" });
   }
 });
 
@@ -2076,6 +2708,618 @@ app.get(
   }
 );
 
+// Get RPP by Guru
+// Get RPP dengan detail lengkap
+app.get("/api/rpp", authenticateToken, async (req, res) => {
+  try {
+    const { guru_id, status } = req.query;
+    console.log("Mengambil data RPP");
+
+    let query = `
+      SELECT r.*, 
+        mp.nama as mata_pelajaran_nama,
+        u.nama as guru_nama,
+        k.nama as kelas_nama
+      FROM rpp r
+      JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id
+      JOIN users u ON r.guru_id = u.id
+      LEFT JOIN kelas k ON r.kelas_id = k.id
+      WHERE 1=1
+    `;
+    let params = [];
+
+    if (guru_id) {
+      query += " AND r.guru_id = ?";
+      params.push(guru_id);
+    }
+
+    if (status) {
+      query += " AND r.status = ?";
+      params.push(status);
+    }
+
+    query += " ORDER BY r.created_at DESC";
+
+    const connection = await getConnection();
+    const [rpp] = await connection.execute(query, params);
+    await connection.end();
+
+    console.log("Berhasil mengambil data RPP, jumlah:", rpp.length);
+    res.json(rpp);
+  } catch (error) {
+    console.error("ERROR GET RPP:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data RPP" });
+  }
+});
+
+// Create RPP dengan handling undefined values
+app.post("/api/rpp", authenticateToken, async (req, res) => {
+  try {
+    console.log("Menambah RPP:", req.body);
+    const {
+      guru_id,
+      mata_pelajaran_id,
+      kelas_id,
+      judul,
+      semester,
+      tahun_ajaran,
+      kompetensi_inti,
+      kompetensi_dasar,
+      indikator,
+      tujuan_pembelajaran,
+      materi_pokok,
+      metode_pembelajaran,
+      media_alat,
+      sumber_belajar,
+      kegiatan_pembelajaran,
+      penilaian,
+      file_path,
+      status = "Menunggu",
+    } = req.body;
+
+    // Validasi field required
+    if (
+      !guru_id ||
+      !mata_pelajaran_id ||
+      !judul ||
+      !semester ||
+      !tahun_ajaran
+    ) {
+      return res.status(400).json({
+        error: "Data tidak lengkap",
+        required: [
+          "guru_id",
+          "mata_pelajaran_id",
+          "judul",
+          "semester",
+          "tahun_ajaran",
+        ],
+      });
+    }
+
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+
+    const connection = await getConnection();
+
+    // Handle undefined values by converting them to null
+    const cleanKelasId = kelas_id || null;
+    const cleanKompetensiInti = kompetensi_inti || null;
+    const cleanKompetensiDasar = kompetensi_dasar || null;
+    const cleanIndikator = indikator || null;
+    const cleanTujuanPembelajaran = tujuan_pembelajaran || null;
+    const cleanMateriPokok = materi_pokok || null;
+    const cleanMetodePembelajaran = metode_pembelajaran || null;
+    const cleanMediaAlat = media_alat || null;
+    const cleanSumberBelajar = sumber_belajar || null;
+    const cleanKegiatanPembelajaran = kegiatan_pembelajaran || null;
+    const cleanPenilaian = penilaian || null;
+    const cleanFilePath = file_path || null;
+
+    await connection.execute(
+      `INSERT INTO rpp (
+        id, guru_id, mata_pelajaran_id, kelas_id, judul, semester, tahun_ajaran,
+        kompetensi_inti, kompetensi_dasar, indikator, tujuan_pembelajaran,
+        materi_pokok, metode_pembelajaran, media_alat, sumber_belajar,
+        kegiatan_pembelajaran, penilaian, file_path, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        guru_id,
+        mata_pelajaran_id,
+        cleanKelasId,
+        judul,
+        semester,
+        tahun_ajaran,
+        cleanKompetensiInti,
+        cleanKompetensiDasar,
+        cleanIndikator,
+        cleanTujuanPembelajaran,
+        cleanMateriPokok,
+        cleanMetodePembelajaran,
+        cleanMediaAlat,
+        cleanSumberBelajar,
+        cleanKegiatanPembelajaran,
+        cleanPenilaian,
+        cleanFilePath,
+        status,
+        createdAt,
+      ]
+    );
+    await connection.end();
+
+    console.log("Berhasil menambah RPP:", id);
+    res.json({ id, message: "RPP berhasil disimpan" });
+  } catch (error) {
+    console.error("ERROR CREATE RPP:", error.message);
+    console.error("Error details:", error);
+    res.status(500).json({ error: "Gagal menyimpan RPP: " + error.message });
+  }
+});
+
+// Update status RPP (untuk admin)
+app.put("/api/rpp/:id/status", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, catatan } = req.body;
+
+    console.log("Update status RPP:", id, status);
+
+    const connection = await getConnection();
+    await connection.execute(
+      "UPDATE rpp SET status = ?, catatan_admin = ?, updated_at = NOW() WHERE id = ?",
+      [status, catatan || "", id]
+    );
+    await connection.end();
+
+    console.log("Status RPP berhasil diupdate:", id);
+    res.json({ message: "Status RPP berhasil diupdate" });
+  } catch (error) {
+    console.error("ERROR UPDATE RPP STATUS:", error.message);
+    res.status(500).json({ error: "Gagal mengupdate status RPP" });
+  }
+});
+
+// Delete RPP
+app.delete("/api/rpp/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Delete RPP:", id);
+
+    const connection = await getConnection();
+    await connection.execute("DELETE FROM rpp WHERE id = ?", [id]);
+    await connection.end();
+
+    console.log("RPP berhasil dihapus:", id);
+    res.json({ message: "RPP berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR DELETE RPP:", error.message);
+    res.status(500).json({ error: "Gagal menghapus RPP" });
+  }
+});
+
+// File upload endpoint
+const multer = require("multer");
+const path = require("path");
+
+// Konfigurasi storage untuk multer
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, "uploads/rpp");
+    require("fs").mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    // Format: timestamp-namaFile-asli
+    const timestamp = Date.now();
+    const originalName = file.originalname;
+    const fileName = `${timestamp}-${originalName}`;
+    cb(null, fileName);
+  },
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max file size
+  },
+  fileFilter: function (req, file, cb) {
+    // Hanya izinkan file Word dan PDF
+    const allowedTypes = [
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/pdf",
+    ];
+
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error("Hanya file Word (.doc, .docx) dan PDF yang diizinkan"),
+        false
+      );
+    }
+  },
+});
+
+// Endpoint untuk upload file
+app.post(
+  "/api/upload/rpp",
+  authenticateToken,
+  upload.single("file"),
+  (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      const fileUrl = `/uploads/rpp/${req.file.filename}`;
+
+      res.json({
+        message: "File berhasil diupload",
+        file_path: fileUrl,
+        file_name: req.file.originalname,
+        file_size: req.file.size,
+      });
+    } catch (error) {
+      console.error("ERROR UPLOAD FILE:", error.message);
+      res.status(500).json({ error: "Gagal mengupload file" });
+    }
+  }
+);
+
+// Get kegiatan by guru
+app.get("/api/kegiatan/guru/:guruId", authenticateToken, async (req, res) => {
+  try {
+    const { guruId } = req.params;
+    console.log("Mengambil kegiatan untuk guru:", guruId);
+
+    const connection = await getConnection();
+
+    const [kegiatan] = await connection.execute(
+      `
+      SELECT 
+        kk.*,
+        mp.nama as mata_pelajaran_nama,
+        kls.nama as kelas_nama,
+        u.nama as guru_nama,
+        bm.judul_bab,
+        sbm.judul_sub_bab,
+        GROUP_CONCAT(DISTINCT s.nama) as siswa_target_names
+      FROM kegiatan_kelas kk
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
+      JOIN kelas kls ON kk.kelas_id = kls.id
+      JOIN users u ON kk.guru_id = u.id
+      LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
+      LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
+      LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id
+      LEFT JOIN siswa s ON kst.siswa_id = s.id
+      WHERE kk.guru_id = ?
+      GROUP BY kk.id
+      ORDER BY kk.tanggal DESC, kk.created_at DESC
+    `,
+      [guruId]
+    );
+
+    await connection.end();
+
+    console.log("Kegiatan ditemukan:", kegiatan.length);
+    res.json(kegiatan);
+  } catch (error) {
+    console.error("ERROR GET KEGIATAN:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data kegiatan" });
+  }
+});
+
+// Get kegiatan by kelas (untuk siswa)
+app.get("/api/kegiatan/kelas/:kelasId", authenticateToken, async (req, res) => {
+  try {
+    const { kelasId } = req.params;
+    const { siswa_id } = req.query;
+
+    console.log("Mengambil kegiatan untuk kelas:", kelasId);
+
+    const connection = await getConnection();
+
+    let query = `
+      SELECT 
+        kk.*,
+        mp.nama as mata_pelajaran_nama,
+        kls.nama as kelas_nama,
+        u.nama as guru_nama,
+        bm.judul_bab,
+        sbm.judul_sub_bab,
+        (kst.siswa_id IS NOT NULL) as untuk_siswa_ini
+      FROM kegiatan_kelas kk
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
+      JOIN kelas kls ON kk.kelas_id = kls.id
+      JOIN users u ON kk.guru_id = u.id
+      LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
+      LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
+      LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id AND kst.siswa_id = ?
+      WHERE kk.kelas_id = ? AND (kk.target = 'umum' OR kst.siswa_id = ?)
+      GROUP BY kk.id
+      ORDER BY kk.tanggal DESC, kk.created_at DESC
+    `;
+
+    const [kegiatan] = await connection.execute(query, [
+      siswa_id,
+      kelasId,
+      siswa_id,
+    ]);
+
+    await connection.end();
+
+    console.log("Kegiatan ditemukan:", kegiatan.length);
+    res.json(kegiatan);
+  } catch (error) {
+    console.error("ERROR GET KEGIATAN KELAS:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data kegiatan" });
+  }
+});
+
+// Create kegiatan baru
+app.post("/api/kegiatan", authenticateToken, async (req, res) => {
+  try {
+    console.log("Menambah kegiatan baru:", req.body);
+    const {
+      guru_id,
+      mata_pelajaran_id,
+      kelas_id,
+      judul,
+      deskripsi,
+      jenis,
+      target,
+      bab_id,
+      sub_bab_id,
+      batas_waktu,
+      tanggal,
+      hari,
+      siswa_target,
+    } = req.body;
+
+    // Validasi data required
+    if (
+      !guru_id ||
+      !mata_pelajaran_id ||
+      !kelas_id ||
+      !judul ||
+      !tanggal ||
+      !hari
+    ) {
+      return res.status(400).json({
+        error: "Data tidak lengkap",
+        required: [
+          "guru_id",
+          "mata_pelajaran_id",
+          "kelas_id",
+          "judul",
+          "tanggal",
+          "hari",
+        ],
+      });
+    }
+
+    const id = crypto.randomUUID();
+    const connection = await getConnection();
+
+    // Mulai transaction
+    await connection.beginTransaction();
+
+    try {
+      // Insert kegiatan utama
+      await connection.execute(
+        `INSERT INTO kegiatan_kelas 
+         (id, guru_id, mata_pelajaran_id, kelas_id, judul, deskripsi, jenis, target, 
+          bab_id, sub_bab_id, batas_waktu, tanggal, hari) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          guru_id,
+          mata_pelajaran_id,
+          kelas_id,
+          judul,
+          deskripsi || null,
+          jenis || "materi",
+          target || "umum",
+          bab_id || null,
+          sub_bab_id || null,
+          batas_waktu || null,
+          tanggal,
+          hari,
+        ]
+      );
+
+      // Jika target khusus, insert siswa target
+      if (target === "khusus" && siswa_target && siswa_target.length > 0) {
+        for (const siswaId of siswa_target) {
+          const targetId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO kegiatan_siswa_target (id, kegiatan_id, siswa_id) VALUES (?, ?, ?)",
+            [targetId, id, siswaId]
+          );
+        }
+      }
+
+      // Commit transaction
+      await connection.commit();
+
+      console.log("Kegiatan berhasil ditambahkan:", id);
+      res.status(201).json({
+        message: "Kegiatan berhasil ditambahkan",
+        id,
+        type: "created",
+      });
+    } catch (transactionError) {
+      // Rollback jika ada error
+      await connection.rollback();
+      throw transactionError;
+    } finally {
+      await connection.end();
+    }
+  } catch (error) {
+    console.error("ERROR CREATE KEGIATAN:", error.message);
+    console.error("SQL Error code:", error.code);
+
+    if (error.code === "ER_NO_REFERENCED_ROW_2") {
+      return res.status(400).json({ error: "Data referensi tidak valid" });
+    }
+
+    res
+      .status(500)
+      .json({ error: "Gagal menambah kegiatan: " + error.message });
+  }
+});
+
+// Update kegiatan
+app.put("/api/kegiatan/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Update kegiatan:", id, req.body);
+
+    const {
+      judul,
+      deskripsi,
+      jenis,
+      target,
+      bab_id,
+      sub_bab_id,
+      batas_waktu,
+      tanggal,
+      hari,
+      siswa_target,
+    } = req.body;
+
+    const connection = await getConnection();
+    await connection.beginTransaction();
+
+    try {
+      // Update kegiatan utama
+      await connection.execute(
+        `UPDATE kegiatan_kelas 
+         SET judul = ?, deskripsi = ?, jenis = ?, target = ?, 
+             bab_id = ?, sub_bab_id = ?, batas_waktu = ?, tanggal = ?, hari = ?,
+             updated_at = NOW()
+         WHERE id = ?`,
+        [
+          judul,
+          deskripsi || null,
+          jenis,
+          target,
+          bab_id || null,
+          sub_bab_id || null,
+          batas_waktu || null,
+          tanggal,
+          hari,
+          id,
+        ]
+      );
+
+      // Hapus siswa target lama
+      await connection.execute(
+        "DELETE FROM kegiatan_siswa_target WHERE kegiatan_id = ?",
+        [id]
+      );
+
+      // Insert siswa target baru jika target khusus
+      if (target === "khusus" && siswa_target && siswa_target.length > 0) {
+        for (const siswaId of siswa_target) {
+          const targetId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO kegiatan_siswa_target (id, kegiatan_id, siswa_id) VALUES (?, ?, ?)",
+            [targetId, id, siswaId]
+          );
+        }
+      }
+
+      await connection.commit();
+
+      console.log("Kegiatan berhasil diupdate:", id);
+      res.json({ message: "Kegiatan berhasil diupdate" });
+    } catch (transactionError) {
+      await connection.rollback();
+      throw transactionError;
+    } finally {
+      await connection.end();
+    }
+  } catch (error) {
+    console.error("ERROR UPDATE KEGIATAN:", error.message);
+    res.status(500).json({ error: "Gagal mengupdate kegiatan" });
+  }
+});
+
+// Delete kegiatan
+app.delete("/api/kegiatan/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Delete kegiatan:", id);
+
+    const connection = await getConnection();
+
+    // Hapus otomatis akan cascade ke kegiatan_siswa_target karena foreign key constraint
+    await connection.execute("DELETE FROM kegiatan_kelas WHERE id = ?", [id]);
+    await connection.end();
+
+    console.log("Kegiatan berhasil dihapus:", id);
+    res.json({ message: "Kegiatan berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR DELETE KEGIATAN:", error.message);
+    res.status(500).json({ error: "Gagal menghapus kegiatan" });
+  }
+});
+
+// Get jadwal untuk dropdown (disesuaikan)
+app.get("/api/jadwal/guru/:guruId", authenticateToken, async (req, res) => {
+  try {
+    const { guruId } = req.params;
+    const { hari, tahun_ajaran } = req.query;
+
+    console.log("Mengambil jadwal untuk form kegiatan:", guruId);
+
+    let query = `
+      SELECT 
+        jm.id,
+        jm.kelas_id,
+        k.nama as kelas_nama,
+        jm.mata_pelajaran_id,
+        mp.nama as mata_pelajaran_nama,
+        jm.hari_id,
+        h.nama as hari_nama
+      FROM jadwal_mengajar jm
+      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
+      JOIN hari h ON jm.hari_id = h.id
+      WHERE jm.guru_id = ?
+    `;
+
+    let params = [guruId];
+
+    if (hari && hari !== "Semua Hari") {
+      query += " AND h.nama = ?";
+      params.push(hari);
+    }
+
+    if (tahun_ajaran) {
+      query += " AND jm.tahun_ajaran = ?";
+      params.push(tahun_ajaran);
+    }
+
+    query += " ORDER BY h.urutan, k.nama";
+
+    const connection = await getConnection();
+    const [jadwal] = await connection.execute(query, params);
+    await connection.end();
+
+    console.log("Jadwal ditemukan untuk form:", jadwal.length);
+    res.json(jadwal);
+  } catch (error) {
+    console.error("ERROR GET JADWAL FORM:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data jadwal" });
+  }
+});
+
+// Serve static files untuk uploads
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 // Endpoint untuk mengecek koneksi database
 app.get("/api/health", async (req, res) => {
   try {
