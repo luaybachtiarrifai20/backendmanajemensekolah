@@ -6,21 +6,22 @@ const cors = require("cors");
 const crypto = require("crypto");
 const multer = require("multer");
 const path = require("path");
-
+const XLSX = require("xlsx");
+const fs = require("fs");
+require("dotenv").config();
 const app = express();
 app.use(express.json());
 app.use(cors());
 
 // Konfigurasi database langsung (ganti dengan nilai yang sesuai)
 const dbConfig = {
-  host: "Libra.web.id",
-  user: "vldgkamz_luay",
-  password: "libraayra20", // atau password kamu
-  database: "vldgkamz_manajemensekolah",
-  port: 3306,
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306, // default value jika tidak ada
 };
 
-// Konfigurasi JWT secret
 const JWT_SECRET = "secret_key_yang_aman_dan_unik";
 
 // Middleware untuk koneksi database dengan error handling
@@ -74,7 +75,7 @@ const storage = multer.diskStorage({
     const timestamp = Date.now();
     const originalName = file.originalname;
     // Bersihkan nama file dari karakter khusus
-    const cleanName = originalName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    const cleanName = originalName.replace(/[^a-zA-Z0-9.\-_]/g, "_");
     const fileName = `${timestamp}-${cleanName}`;
     console.log("Generated filename:", fileName);
     cb(null, fileName);
@@ -88,7 +89,7 @@ const upload = multer({
   },
   fileFilter: function (req, file, cb) {
     console.log("File filter checking:", file.mimetype, file.originalname);
-    
+
     // Hanya izinkan file Word dan PDF
     const allowedTypes = [
       "application/msword",
@@ -96,10 +97,13 @@ const upload = multer({
       "application/pdf",
     ];
 
-    const allowedExtensions = ['.pdf', '.doc', '.docx'];
+    const allowedExtensions = [".pdf", ".doc", ".docx"];
     const fileExtension = path.extname(file.originalname).toLowerCase();
 
-    if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(fileExtension)) {
+    if (
+      allowedTypes.includes(file.mimetype) ||
+      allowedExtensions.includes(fileExtension)
+    ) {
       cb(null, true);
     } else {
       console.log("File type rejected:", file.mimetype, fileExtension);
@@ -113,18 +117,18 @@ const upload = multer({
 
 // Error handling untuk multer
 const uploadMiddleware = (req, res, next) => {
-  upload.single('file')(req, res, function (err) {
+  upload.single("file")(req, res, function (err) {
     if (err instanceof multer.MulterError) {
       // A Multer error occurred when uploading.
       console.error("Multer Error:", err);
-      return res.status(400).json({ 
-        error: `Upload error: ${err.message}` 
+      return res.status(400).json({
+        error: `Upload error: ${err.message}`,
       });
     } else if (err) {
       // An unknown error occurred.
       console.error("Unknown Upload Error:", err);
-      return res.status(500).json({ 
-        error: `Upload failed: ${err.message}` 
+      return res.status(500).json({
+        error: `Upload failed: ${err.message}`,
       });
     }
     // Everything went fine.
@@ -132,6 +136,69 @@ const uploadMiddleware = (req, res, next) => {
   });
 };
 
+// Konfigurasi storage untuk file Excel
+const excelStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, "uploads/excel");
+    const fs = require("fs");
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const timestamp = Date.now();
+    const originalName = file.originalname;
+    const cleanName = originalName.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+    const fileName = `${timestamp}-${cleanName}`;
+    cb(null, fileName);
+  },
+});
+
+// Konfigurasi multer untuk memory storage (tidak menyimpan file)
+const excelUpload = multer({
+  storage: multer.memoryStorage(), // Simpan di memory saja
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB max file size
+  },
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = [
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.oasis.opendocument.spreadsheet",
+    ];
+
+    const allowedExtensions = [".xls", ".xlsx", ".ods"];
+    const fileExtension = path.extname(file.originalname).toLowerCase();
+
+    if (
+      allowedTypes.includes(file.mimetype) ||
+      allowedExtensions.includes(fileExtension)
+    ) {
+      cb(null, true);
+    } else {
+      cb(new Error("Hanya file Excel (.xls, .xlsx) yang diizinkan"), false);
+    }
+  },
+});
+
+// Middleware untuk upload Excel (memory storage)
+const excelUploadMiddleware = (req, res, next) => {
+  excelUpload.single("file")(req, res, function (err) {
+    if (err instanceof multer.MulterError) {
+      console.error("Multer Error:", err);
+      return res.status(400).json({
+        error: `Upload error: ${err.message}`,
+      });
+    } else if (err) {
+      console.error("Unknown Upload Error:", err);
+      return res.status(500).json({
+        error: `Upload failed: ${err.message}`,
+      });
+    }
+    next();
+  });
+};
 
 // Di bagian endpoint siswa, tambahkan fungsi untuk membuat user wali
 async function createWaliUser(email, namaWali, siswaId) {
@@ -196,7 +263,6 @@ app.use((req, res, next) => {
   next();
 });
 
-
 // Routes
 
 // Login
@@ -254,6 +320,45 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// Endpoint untuk mendapatkan grade levels dari school_configs
+app.get(
+  "/api/school-configs/grade-levels",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      console.log("Mengambil data grade levels dari school_configs");
+
+      const connection = await getConnection();
+
+      // Ambil data dari tabel school_configs
+      const [configs] = await connection.execute(
+        "SELECT value FROM school_configs WHERE config_key = 'grade_levels'"
+      );
+
+      await connection.end();
+
+      if (configs.length === 0) {
+        // Jika tidak ada konfigurasi, kembalikan default
+        console.log(
+          "Konfigurasi grade_levels tidak ditemukan, menggunakan default"
+        );
+        return res.json([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      }
+
+      try {
+        const gradeLevels = JSON.parse(configs[0].value);
+        console.log("Grade levels ditemukan:", gradeLevels);
+        res.json(gradeLevels);
+      } catch (parseError) {
+        console.error("ERROR PARSING GRADE LEVELS:", parseError.message);
+        res.json([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      }
+    } catch (error) {
+      console.error("ERROR GET GRADE LEVELS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil data grade levels" });
+    }
+  }
+);
 // Kelola Kelas
 app.get("/api/kelas", authenticateToken, async (req, res) => {
   try {
@@ -276,16 +381,293 @@ app.get("/api/kelas", authenticateToken, async (req, res) => {
   }
 });
 
+app.post("/api/export-classes", async (req, res) => {
+  try {
+    const { classes } = req.body;
+
+    if (!classes || !Array.isArray(classes)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data kelas tidak valid",
+      });
+    }
+
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Prepare data for Excel
+    const excelData = [
+      // Header row
+      ["Nama Kelas*", "Grade Level*", "Wali Kelas", "Jumlah Siswa", "Status"],
+      // Data rows
+      ...classes.map((classItem) => [
+        classItem.nama || "",
+        classItem.grade_level?.toString() || "",
+        classItem.wali_kelas_nama || "-",
+        classItem.jumlah_siswa?.toString() || "0",
+        "Active",
+      ]),
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+    // Add style to header row (basic styling)
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    for (let i = 0; i < 5; i++) {
+      worksheet["!cols"][i] = { width: 15 };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data Kelas");
+
+    // Generate filename
+    const filename = `Data_Kelas_${Date.now()}.xlsx`;
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading file:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh file",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    console.error("Export classes error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengexport data: ${error.message}`,
+    });
+  }
+});
+
+// Download template Excel untuk kelas
+app.get("/api/download-class-template", async (req, res) => {
+  try {
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Prepare template data
+    const templateData = [
+      // Header row
+      ["Nama Kelas", "Grade Level", "Wali Kelas"],
+      // Example data
+      ["7A", "10", "Budi Santoso"],
+      ["7B", "10", "Siti Rahayu"],
+      ["7B", "11", "Ahmad Wijaya"],
+      // Empty row
+      [],
+      // Notes
+      ["* Wajib diisi"],
+      ["Grade Level: 1-12 (SD-SMA)"],
+      ["Wali Kelas: Nama guru yang terdaftar"],
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(templateData);
+
+    // Set column widths
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    for (let i = 0; i < 3; i++) {
+      worksheet["!cols"][i] = { width: 20 };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Template Kelas");
+
+    // Generate filename
+    const filename = "Template_Import_Kelas.xlsx";
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading template:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh template",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    console.error("Class template download error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengunduh template: ${error.message}`,
+    });
+  }
+});
+
+// Download template CSV untuk kelas
+app.get("/api/download-class-template-csv", async (req, res) => {
+  try {
+    const csvContent = `Nama Kelas*,Grade Level*,Wali Kelas
+X IPA 1,10,Budi Santoso
+X IPA 2,10,Siti Rahayu
+XI IPA 1,11,Ahmad Wijaya
+
+*Wajib diisi
+Grade Level: 1-12 (SD-SMA)
+Wali Kelas: Nama guru yang terdaftar`;
+
+    // Generate filename
+    const filename = "Template_Import_Kelas.csv";
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write CSV file
+    fs.writeFileSync(filePath, csvContent, "utf8");
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading CSV template:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh template CSV",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    console.error("CSV template download error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengunduh template CSV: ${error.message}`,
+    });
+  }
+});
+
+// Validasi data kelas sebelum import
+app.post("/api/validate-classes", async (req, res) => {
+  try {
+    const { classes } = req.body;
+
+    if (!classes || !Array.isArray(classes)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data kelas tidak valid",
+      });
+    }
+
+    const validatedData = [];
+    const errors = [];
+
+    for (let i = 0; i < classes.length; i++) {
+      const classItem = classes[i];
+      const validatedClass = {};
+      let hasError = false;
+
+      // Validasi field required
+      if (!classItem.nama || classItem.nama.toString().trim() === "") {
+        errors.push(`Baris ${i + 1}: Nama kelas tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedClass.nama = classItem.nama;
+      }
+
+      if (
+        classItem.grade_level === null ||
+        classItem.grade_level === undefined
+      ) {
+        errors.push(`Baris ${i + 1}: Grade level tidak boleh kosong`);
+        hasError = true;
+      } else {
+        const gradeLevel = parseInt(classItem.grade_level);
+        if (isNaN(gradeLevel) || gradeLevel < 1 || gradeLevel > 12) {
+          errors.push(`Baris ${i + 1}: Grade level harus antara 1-12`);
+          hasError = true;
+        } else {
+          validatedClass.grade_level = gradeLevel;
+        }
+      }
+
+      // Field optional
+      validatedClass.wali_kelas_nama = classItem.wali_kelas_nama || "";
+      validatedClass.jumlah_siswa = classItem.jumlah_siswa || 0;
+
+      if (!hasError) {
+        validatedData.push(validatedClass);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Validasi data gagal",
+        errors: errors,
+        validatedData: validatedData,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Validasi data berhasil",
+      validatedData: validatedData,
+    });
+  } catch (error) {
+    console.error("Class validation error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal validasi data: ${error.message}`,
+    });
+  }
+});
+
+// Di index.js - Update endpoint POST kelas
 app.post("/api/kelas", authenticateToken, async (req, res) => {
   try {
     console.log("Menambah kelas baru:", req.body);
-    const { nama, wali_kelas_id } = req.body;
+    const { nama, wali_kelas_id, grade_level } = req.body; // Tambahkan grade_level
     const id = crypto.randomUUID();
 
     const connection = await getConnection();
     await connection.execute(
-      "INSERT INTO kelas (id, nama, wali_kelas_id) VALUES (?, ?, ?)",
-      [id, nama, wali_kelas_id]
+      "INSERT INTO kelas (id, nama, wali_kelas_id, grade_level) VALUES (?, ?, ?, ?)", // Tambahkan grade_level
+      [id, nama, wali_kelas_id, grade_level]
     );
     await connection.end();
 
@@ -298,17 +680,17 @@ app.post("/api/kelas", authenticateToken, async (req, res) => {
   }
 });
 
-// Update Kelas
+// Update endpoint PUT kelas
 app.put("/api/kelas/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Update kelas:", id, req.body);
-    const { nama, wali_kelas_id } = req.body;
+    const { nama, wali_kelas_id, grade_level } = req.body; // Tambahkan grade_level
 
     const connection = await getConnection();
     await connection.execute(
-      "UPDATE kelas SET nama = ?, wali_kelas_id = ? WHERE id = ?",
-      [nama, wali_kelas_id, id]
+      "UPDATE kelas SET nama = ?, wali_kelas_id = ?, grade_level = ? WHERE id = ?", // Tambahkan grade_level
+      [nama, wali_kelas_id, grade_level, id]
     );
     await connection.end();
 
@@ -482,6 +864,1251 @@ app.get("/api/siswa/kelas/:kelasId", authenticateToken, async (req, res) => {
   }
 });
 
+// Endpoint untuk download template kelas
+app.get("/api/kelas/template", authenticateToken, async (req, res) => {
+  try {
+    const XLSX = require("xlsx");
+
+    // Data contoh untuk template kelas
+    const templateData = [
+      {
+        nama: "X IPA 1",
+        grade_level: "10",
+        wali_kelas_nama: "Budi Santoso",
+      },
+      {
+        nama: "X IPA 2",
+        grade_level: "10",
+        wali_kelas_nama: "Siti Rahayu",
+      },
+      {
+        nama: "XI IPA 1",
+        grade_level: "11",
+        wali_kelas_nama: "Ahmad Wijaya",
+      },
+    ];
+
+    // Buat workbook
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(templateData);
+
+    // Tambahkan worksheet ke workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Template Kelas");
+
+    // Set header
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="template_import_kelas.xlsx"'
+    );
+
+    // Tulis ke response
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.send(buffer);
+  } catch (error) {
+    console.error("ERROR DOWNLOAD TEMPLATE KELAS:", error.message);
+    res.status(500).json({ error: "Gagal mendownload template kelas" });
+  }
+});
+
+// Import kelas dari Excel
+app.post(
+  "/api/kelas/import",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    let connection;
+    try {
+      console.log("Import kelas dari Excel (memory storage)");
+
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("File received in memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        bufferLength: req.file.buffer.length,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const importedClasses = await readExcelClassesFromBuffer(req.file.buffer);
+
+      if (importedClasses.length === 0) {
+        return res.status(400).json({
+          error: "Tidak ada data kelas yang valid ditemukan dalam file",
+        });
+      }
+
+      console.log(`Found ${importedClasses.length} classes to import`);
+
+      // Ambil data guru untuk mapping wali kelas
+      connection = await getConnection();
+      const [teacherList] = await connection.execute(
+        "SELECT id, nama FROM users WHERE role = 'guru'"
+      );
+      await connection.end();
+
+      // Proses import
+      const result = await processClassImport(importedClasses, teacherList);
+
+      console.log("Import completed:", result);
+      res.json({
+        message: "Import selesai",
+        ...result,
+      });
+    } catch (error) {
+      if (connection) {
+        await connection.end();
+      }
+
+      console.error("ERROR IMPORT KELAS:", error.message);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Gagal mengimport kelas: " + error.message,
+      });
+    }
+  }
+);
+
+// Fungsi untuk membaca Excel kelas dari buffer
+async function readExcelClassesFromBuffer(buffer) {
+  const XLSX = require("xlsx");
+
+  // Baca workbook langsung dari buffer
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+
+  // Konversi ke JSON
+  const data = XLSX.utils.sheet_to_json(worksheet);
+
+  console.log("Raw Excel data from buffer:", data);
+
+  const classes = [];
+
+  data.forEach((row, index) => {
+    try {
+      // Mapping kolom dengan berbagai kemungkinan nama
+      const classData = mapExcelRowToClass(row, index + 2);
+      if (classData) {
+        classes.push(classData);
+      }
+    } catch (error) {
+      console.error(`Error processing row ${index + 2}:`, error);
+    }
+  });
+
+  console.log(`Processed ${classes.length} classes from Excel buffer`);
+  return classes;
+}
+
+// Fungsi mapping row untuk kelas
+function mapExcelRowToClass(row, rowNumber) {
+  // Normalize keys to lowercase for case-insensitive matching
+  const normalizedRow = {};
+  Object.keys(row).forEach((key) => {
+    normalizedRow[key.toLowerCase().trim()] = row[key];
+  });
+
+  console.log(`Processing row ${rowNumber}:`, normalizedRow);
+
+  // Mapping berbagai kemungkinan nama kolom
+  const nama =
+    normalizedRow["nama"] ||
+    normalizedRow["name"] ||
+    normalizedRow["nama kelas"] ||
+    normalizedRow["kelas"] ||
+    normalizedRow["class"] ||
+    "";
+
+  const gradeLevel =
+    normalizedRow["grade_level"] ||
+    normalizedRow["grade level"] ||
+    normalizedRow["tingkat"] ||
+    normalizedRow["level"] ||
+    normalizedRow["tingkat kelas"] ||
+    "";
+
+  const waliKelasNama =
+    normalizedRow["wali_kelas_nama"] ||
+    normalizedRow["wali kelas"] ||
+    normalizedRow["nama wali kelas"] ||
+    normalizedRow["homeroom teacher"] ||
+    normalizedRow["wali"] ||
+    "";
+
+  // Jika data required tidak ada, skip
+  if (!nama || !gradeLevel) {
+    console.log(`Skipping row ${rowNumber}: Missing required data`, {
+      nama,
+      gradeLevel,
+    });
+    return null;
+  }
+
+  // Validasi grade level
+  const cleanGradeLevel = parseInt(gradeLevel);
+  if (isNaN(cleanGradeLevel) || cleanGradeLevel < 1 || cleanGradeLevel > 12) {
+    console.log(`Skipping row ${rowNumber}: Invalid grade level`, gradeLevel);
+    return null;
+  }
+
+  const classData = {
+    nama: nama.toString().trim(),
+    grade_level: cleanGradeLevel,
+    wali_kelas_nama: waliKelasNama.toString().trim(),
+    row_number: rowNumber,
+  };
+
+  console.log(`Mapped class data for row ${rowNumber}:`, classData);
+  return classData;
+}
+
+// Fungsi processClassImport
+async function processClassImport(importedClasses, teacherList) {
+  let connection;
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    connection = await getConnection();
+
+    for (const classData of importedClasses) {
+      try {
+        // Validasi data required
+        if (!classData.nama || !classData.grade_level) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${classData.row_number}: Data required tidak lengkap`
+          );
+          continue;
+        }
+
+        // Cek nama kelas duplikat
+        const [existingClass] = await connection.execute(
+          "SELECT id FROM kelas WHERE nama = ?",
+          [classData.nama]
+        );
+
+        if (existingClass.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${classData.row_number}: Kelas '${classData.nama}' sudah terdaftar`
+          );
+          continue;
+        }
+
+        // Cari wali_kelas_id berdasarkan nama guru (jika ada)
+        let waliKelasId = null;
+        if (classData.wali_kelas_nama) {
+          const teacherItem = teacherList.find(
+            (teacher) =>
+              teacher.nama.toLowerCase() ===
+              classData.wali_kelas_nama.toLowerCase()
+          );
+
+          if (!teacherItem) {
+            results.failed++;
+            results.errors.push(
+              `Baris ${classData.row_number}: Guru '${classData.wali_kelas_nama}' tidak ditemukan`
+            );
+            continue;
+          }
+          waliKelasId = teacherItem.id;
+        }
+
+        // Mulai transaction untuk kelas ini
+        await connection.beginTransaction();
+
+        try {
+          const classId = crypto.randomUUID();
+
+          // Insert kelas
+          await connection.execute(
+            "INSERT INTO kelas (id, nama, grade_level, wali_kelas_id) VALUES (?, ?, ?, ?)",
+            [classId, classData.nama, classData.grade_level, waliKelasId]
+          );
+
+          // Commit transaction
+          await connection.commit();
+          results.success++;
+        } catch (transactionError) {
+          // Rollback jika ada error
+          await connection.rollback();
+          throw transactionError;
+        }
+      } catch (classError) {
+        results.failed++;
+        results.errors.push(
+          `Baris ${classData.row_number}: ${classError.message}`
+        );
+        console.error(
+          `Error importing class ${classData.nama}:`,
+          classError.message
+        );
+      }
+    }
+
+    return results;
+  } catch (error) {
+    throw error;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+}
+
+// Debug endpoint untuk melihat data Excel kelas
+app.post(
+  "/api/debug/excel-kelas",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("Debug Excel file from memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const XLSX = require("xlsx");
+      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+
+      // Dapatkan semua data
+      const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+      const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+      res.json({
+        sheet_name: sheetName,
+        headers: rawData[0] || [],
+        raw_data: rawData,
+        json_data: jsonData,
+        total_rows: rawData.length,
+        file_info: {
+          originalname: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+        },
+      });
+    } catch (error) {
+      console.error("DEBUG EXCEL KELAS ERROR:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Import siswa dari Excel - TANPA SIMPAN FILE
+app.post(
+  "/api/siswa/import",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    let connection;
+    try {
+      console.log("Import siswa dari Excel (memory storage)");
+
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("File received in memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        bufferLength: req.file.buffer.length,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const importedStudents = await readExcelFromBuffer(req.file.buffer);
+
+      if (importedStudents.length === 0) {
+        return res.status(400).json({
+          error: "Tidak ada data siswa yang valid ditemukan dalam file",
+        });
+      }
+
+      console.log(`Found ${importedStudents.length} students to import`);
+
+      // Ambil data kelas untuk mapping
+      connection = await getConnection();
+      const [classList] = await connection.execute(
+        "SELECT id, nama FROM kelas"
+      );
+      await connection.end();
+
+      // Proses import
+      const result = await processStudentImport(importedStudents, classList);
+
+      console.log("Import completed:", result);
+      res.json({
+        message: "Import selesai",
+        ...result,
+      });
+    } catch (error) {
+      if (connection) {
+        await connection.end();
+      }
+
+      console.error("ERROR IMPORT SISWA:", error.message);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Gagal mengimport siswa: " + error.message,
+      });
+    }
+  }
+);
+
+// Fungsi untuk membaca Excel dari buffer (tanpa simpan file)
+async function readExcelFromBuffer(buffer) {
+  const XLSX = require("xlsx");
+
+  // Baca workbook langsung dari buffer
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+
+  // Konversi ke JSON
+  const data = XLSX.utils.sheet_to_json(worksheet);
+
+  console.log("Raw Excel data from buffer:", data);
+
+  const students = [];
+
+  data.forEach((row, index) => {
+    try {
+      // Mapping kolom dengan berbagai kemungkinan nama
+      const studentData = mapExcelRowToStudent(row, index + 2);
+      if (studentData) {
+        students.push(studentData);
+      }
+    } catch (error) {
+      console.error(`Error processing row ${index + 2}:`, error);
+    }
+  });
+
+  console.log(`Processed ${students.length} students from Excel buffer`);
+  return students;
+}
+
+// Fungsi mapping row (sama seperti sebelumnya)
+function mapExcelRowToStudent(row, rowNumber) {
+  // Normalize keys to lowercase for case-insensitive matching
+  const normalizedRow = {};
+  Object.keys(row).forEach((key) => {
+    normalizedRow[key.toLowerCase().trim()] = row[key];
+  });
+
+  console.log(`Processing row ${rowNumber}:`, normalizedRow);
+
+  // Mapping berbagai kemungkinan nama kolom
+  const nis =
+    normalizedRow["nis"] ||
+    normalizedRow["nomor induk siswa"] ||
+    normalizedRow["no induk siswa"] ||
+    normalizedRow["nomor induk"] ||
+    "";
+
+  const nama =
+    normalizedRow["nama"] ||
+    normalizedRow["name"] ||
+    normalizedRow["nama siswa"] ||
+    normalizedRow["nama lengkap"] ||
+    "";
+
+  const kelasNama =
+    normalizedRow["kelas_nama"] ||
+    normalizedRow["kelas"] ||
+    normalizedRow["class"] ||
+    normalizedRow["nama kelas"] ||
+    "";
+
+  // Jika data required tidak ada, skip
+  if (!nis || !nama || !kelasNama) {
+    console.log(`Skipping row ${rowNumber}: Missing required data`, {
+      nis,
+      nama,
+      kelasNama,
+    });
+    return null;
+  }
+
+  // Mapping jenis kelamin
+  let jenisKelamin = "L"; // default
+  const genderValue =
+    normalizedRow["jenis_kelamin"] ||
+    normalizedRow["jenis kelamin"] ||
+    normalizedRow["gender"] ||
+    normalizedRow["kelamin"] ||
+    "";
+
+  if (genderValue) {
+    const normalizedGender = genderValue.toString().toLowerCase().trim();
+    if (
+      normalizedGender.includes("perempuan") ||
+      normalizedGender === "p" ||
+      normalizedGender === "female"
+    ) {
+      jenisKelamin = "P";
+    } else if (
+      normalizedGender.includes("laki") ||
+      normalizedGender === "l" ||
+      normalizedGender === "male"
+    ) {
+      jenisKelamin = "L";
+    }
+  }
+
+  // Format tanggal lahir
+  let tanggalLahir = "";
+  const dobValue =
+    normalizedRow["tanggal_lahir"] ||
+    normalizedRow["tanggal lahir"] ||
+    normalizedRow["tgl lahir"] ||
+    normalizedRow["date of birth"] ||
+    normalizedRow["dob"] ||
+    "";
+
+  if (dobValue) {
+    tanggalLahir = formatDateFromExcel(dobValue);
+  }
+
+  // Mapping lainnya
+  const alamat =
+    normalizedRow["alamat"] ||
+    normalizedRow["address"] ||
+    normalizedRow["alamat lengkap"] ||
+    "";
+
+  const namaWali =
+    normalizedRow["nama_wali"] ||
+    normalizedRow["nama wali"] ||
+    normalizedRow["wali"] ||
+    normalizedRow["parent name"] ||
+    "";
+
+  const noTelepon =
+    normalizedRow["no_telepon"] ||
+    normalizedRow["no telepon"] ||
+    normalizedRow["telepon"] ||
+    normalizedRow["phone"] ||
+    normalizedRow["nomor telepon"] ||
+    "";
+
+  const emailWali =
+    normalizedRow["email_wali"] ||
+    normalizedRow["email wali"] ||
+    normalizedRow["email"] ||
+    normalizedRow["parent email"] ||
+    "";
+
+  const student = {
+    nis: nis.toString().trim(),
+    nama: nama.toString().trim(),
+    kelas_nama: kelasNama.toString().trim(),
+    alamat: alamat.toString().trim(),
+    tanggal_lahir: tanggalLahir,
+    jenis_kelamin: jenisKelamin,
+    nama_wali: namaWali.toString().trim(),
+    no_telepon: noTelepon.toString().trim(),
+    email_wali: emailWali.toString().trim(),
+    row_number: rowNumber,
+  };
+
+  console.log(`Mapped student data for row ${rowNumber}:`, student);
+  return student;
+}
+
+// Fungsi processStudentImport (tetap sama seperti sebelumnya)
+async function processStudentImport(importedStudents, classList) {
+  let connection;
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    connection = await getConnection();
+
+    for (const studentData of importedStudents) {
+      try {
+        // Validasi data required
+        if (!studentData.nis || !studentData.nama || !studentData.kelas_nama) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${studentData.row_number}: Data required tidak lengkap`
+          );
+          continue;
+        }
+
+        // Cari kelas_id berdasarkan nama kelas
+        const classItem = classList.find(
+          (cls) =>
+            cls.nama.toLowerCase() === studentData.kelas_nama.toLowerCase()
+        );
+
+        if (!classItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${studentData.row_number}: Kelas '${studentData.kelas_nama}' tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cek NIS duplikat
+        const [existingNIS] = await connection.execute(
+          "SELECT id FROM siswa WHERE nis = ?",
+          [studentData.nis]
+        );
+
+        if (existingNIS.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${studentData.row_number}: NIS '${studentData.nis}' sudah terdaftar`
+          );
+          continue;
+        }
+
+        // Mulai transaction untuk siswa ini
+        await connection.beginTransaction();
+
+        try {
+          const studentId = crypto.randomUUID();
+          const createdAt = new Date()
+            .toISOString()
+            .slice(0, 19)
+            .replace("T", " ");
+          const updatedAt = createdAt;
+
+          // Insert siswa
+          await connection.execute(
+            "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+              studentId,
+              studentData.nis,
+              studentData.nama,
+              classItem.id,
+              studentData.alamat,
+              studentData.tanggal_lahir,
+              studentData.jenis_kelamin,
+              studentData.nama_wali,
+              studentData.no_telepon,
+              createdAt,
+              updatedAt,
+            ]
+          );
+
+          // Buat user wali jika email disediakan
+          if (studentData.email_wali && studentData.nama_wali) {
+            // Cek apakah email sudah terdaftar
+            const [existingUsers] = await connection.execute(
+              "SELECT id FROM users WHERE email = ?",
+              [studentData.email_wali]
+            );
+
+            if (existingUsers.length === 0) {
+              const waliId = crypto.randomUUID();
+              const password = "password123";
+              const hashedPassword = await bcrypt.hash(password, 10);
+
+              await connection.execute(
+                'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
+                [
+                  waliId,
+                  studentData.nama_wali,
+                  studentData.email_wali,
+                  hashedPassword,
+                  studentId,
+                ]
+              );
+            }
+          }
+
+          // Commit transaction
+          await connection.commit();
+          results.success++;
+        } catch (transactionError) {
+          // Rollback jika ada error
+          await connection.rollback();
+          throw transactionError;
+        }
+      } catch (studentError) {
+        results.failed++;
+        results.errors.push(
+          `Baris ${studentData.row_number}: ${studentError.message}`
+        );
+        console.error(
+          `Error importing student ${studentData.nis}:`,
+          studentError.message
+        );
+      }
+    }
+
+    return results;
+  } catch (error) {
+    throw error;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+}
+
+// Debug endpoint untuk melihat data Excel (memory storage)
+app.post(
+  "/api/debug/excel",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("Debug Excel file from memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const XLSX = require("xlsx");
+      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+
+      // Dapatkan semua data
+      const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+      const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+      res.json({
+        sheet_name: sheetName,
+        headers: rawData[0] || [],
+        raw_data: rawData,
+        json_data: jsonData,
+        total_rows: rawData.length,
+        file_info: {
+          originalname: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+        },
+      });
+    } catch (error) {
+      console.error("DEBUG EXCEL ERROR:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Helper function untuk parse berbagai format tanggal
+function tryParseDate(dateString, format) {
+  try {
+    const parts = dateString.split(/[/\-\.]/);
+    if (parts.length !== 3) return null;
+
+    let day, month, year;
+
+    switch (format) {
+      case "DD/MM/YYYY":
+      case "DD-MM-YYYY":
+        day = parseInt(parts[0]);
+        month = parseInt(parts[1]) - 1;
+        year = parseInt(parts[2]);
+        break;
+      case "MM/DD/YYYY":
+      case "MM-DD-YYYY":
+        month = parseInt(parts[0]) - 1;
+        day = parseInt(parts[1]);
+        year = parseInt(parts[2]);
+        break;
+      case "YYYY/MM/DD":
+      case "YYYY-MM-DD":
+        year = parseInt(parts[0]);
+        month = parseInt(parts[1]) - 1;
+        day = parseInt(parts[2]);
+        break;
+      default:
+        return null;
+    }
+
+    // Validasi tahun
+    if (year < 100) {
+      year += 2000; // Handle 2-digit year
+    }
+
+    const date = new Date(year, month, day);
+    if (
+      !isNaN(date.getTime()) &&
+      date.getDate() === day &&
+      date.getMonth() === month &&
+      date.getFullYear() === year
+    ) {
+      return date;
+    }
+  } catch (error) {
+    console.error("Error parsing date:", error);
+  }
+
+  return null;
+}
+// Fungsi improved untuk format tanggal dari Excel
+function formatDateFromExcel(dateValue) {
+  if (!dateValue) return "";
+
+  console.log("Original date value:", dateValue, "Type:", typeof dateValue);
+
+  try {
+    // Jika sudah dalam format string ISO
+    if (typeof dateValue === "string") {
+      // Coba parse berbagai format
+      const dateFormats = [
+        "YYYY-MM-DD",
+        "DD/MM/YYYY",
+        "MM/DD/YYYY",
+        "YYYY/MM/DD",
+        "DD-MM-YYYY",
+        "MM-DD-YYYY",
+      ];
+
+      for (const format of dateFormats) {
+        const parsed = tryParseDate(dateValue, format);
+        if (parsed) {
+          return parsed.toISOString().split("T")[0];
+        }
+      }
+
+      // Jika mengandung timestamp, ambil hanya tanggalnya
+      if (dateValue.includes(" ")) {
+        const datePart = dateValue.split(" ")[0];
+        const parsed = new Date(datePart);
+        if (!isNaN(parsed.getTime())) {
+          return parsed.toISOString().split("T")[0];
+        }
+      }
+    }
+
+    // Jika dari Excel (number)
+    if (typeof dateValue === "number") {
+      const excelEpoch = new Date(1899, 11, 30); // Excel epoch
+      const date = new Date(
+        excelEpoch.getTime() + (dateValue - 1) * 24 * 60 * 60 * 1000
+      );
+      if (!isNaN(date.getTime())) {
+        return date.toISOString().split("T")[0];
+      }
+    }
+
+    // Jika Date object
+    if (dateValue instanceof Date) {
+      if (!isNaN(dateValue.getTime())) {
+        return dateValue.toISOString().split("T")[0];
+      }
+    }
+
+    // Coba parse sebagai date langsung
+    const parsed = new Date(dateValue);
+    if (!isNaN(parsed.getTime())) {
+      return parsed.toISOString().split("T")[0];
+    }
+  } catch (error) {
+    console.error("Error formatting date:", error);
+  }
+
+  return ""; // Return empty string jika tidak bisa diparse
+}
+
+// Fungsi untuk mapping berbagai format kolom Excel
+function mapExcelRowToStudent(row, rowNumber) {
+  // Normalize keys to lowercase for case-insensitive matching
+  const normalizedRow = {};
+  Object.keys(row).forEach((key) => {
+    normalizedRow[key.toLowerCase().trim()] = row[key];
+  });
+
+  console.log(`Processing row ${rowNumber}:`, normalizedRow);
+
+  // Mapping berbagai kemungkinan nama kolom
+  const nis =
+    normalizedRow["nis"] ||
+    normalizedRow["nomor induk siswa"] ||
+    normalizedRow["no induk siswa"] ||
+    normalizedRow["nomor induk"] ||
+    "";
+
+  const nama =
+    normalizedRow["nama"] ||
+    normalizedRow["name"] ||
+    normalizedRow["nama siswa"] ||
+    normalizedRow["nama lengkap"] ||
+    "";
+
+  const kelasNama =
+    normalizedRow["kelas_nama"] ||
+    normalizedRow["kelas"] ||
+    normalizedRow["class"] ||
+    normalizedRow["nama kelas"] ||
+    "";
+
+  // Jika data required tidak ada, skip
+  if (!nis || !nama || !kelasNama) {
+    console.log(`Skipping row ${rowNumber}: Missing required data`, {
+      nis,
+      nama,
+      kelasNama,
+    });
+    return null;
+  }
+
+  // Mapping jenis kelamin
+  let jenisKelamin = "L"; // default
+  const genderValue =
+    normalizedRow["jenis_kelamin"] ||
+    normalizedRow["jenis kelamin"] ||
+    normalizedRow["gender"] ||
+    normalizedRow["kelamin"] ||
+    "";
+
+  if (genderValue) {
+    const normalizedGender = genderValue.toString().toLowerCase().trim();
+    if (
+      normalizedGender.includes("perempuan") ||
+      normalizedGender === "p" ||
+      normalizedGender === "female"
+    ) {
+      jenisKelamin = "P";
+    } else if (
+      normalizedGender.includes("laki") ||
+      normalizedGender === "l" ||
+      normalizedGender === "male"
+    ) {
+      jenisKelamin = "L";
+    }
+  }
+
+  // Format tanggal lahir
+  let tanggalLahir = "";
+  const dobValue =
+    normalizedRow["tanggal_lahir"] ||
+    normalizedRow["tanggal lahir"] ||
+    normalizedRow["tgl lahir"] ||
+    normalizedRow["date of birth"] ||
+    normalizedRow["dob"] ||
+    "";
+
+  if (dobValue) {
+    tanggalLahir = formatDateFromExcel(dobValue);
+  }
+
+  // Mapping lainnya
+  const alamat =
+    normalizedRow["alamat"] ||
+    normalizedRow["address"] ||
+    normalizedRow["alamat lengkap"] ||
+    "";
+
+  const namaWali =
+    normalizedRow["nama_wali"] ||
+    normalizedRow["nama wali"] ||
+    normalizedRow["wali"] ||
+    normalizedRow["parent name"] ||
+    "";
+
+  const noTelepon =
+    normalizedRow["no_telepon"] ||
+    normalizedRow["no telepon"] ||
+    normalizedRow["telepon"] ||
+    normalizedRow["phone"] ||
+    normalizedRow["nomor telepon"] ||
+    "";
+
+  const emailWali =
+    normalizedRow["email_wali"] ||
+    normalizedRow["email wali"] ||
+    normalizedRow["email"] ||
+    normalizedRow["parent email"] ||
+    "";
+
+  const student = {
+    nis: nis.toString().trim(),
+    nama: nama.toString().trim(),
+    kelas_nama: kelasNama.toString().trim(),
+    alamat: alamat.toString().trim(),
+    tanggal_lahir: tanggalLahir,
+    jenis_kelamin: jenisKelamin,
+    nama_wali: namaWali.toString().trim(),
+    no_telepon: noTelepon.toString().trim(),
+    email_wali: emailWali.toString().trim(),
+    row_number: rowNumber,
+  };
+
+  console.log(`Mapped student data for row ${rowNumber}:`, student);
+  return student;
+}
+
+// Fungsi untuk membaca file Excel - PERBAIKAN
+async function readExcelFile(filePath) {
+  const XLSX = require("xlsx");
+  const workbook = XLSX.readFile(filePath);
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+
+  // Konversi ke JSON
+  const data = XLSX.utils.sheet_to_json(worksheet);
+
+  console.log("Raw Excel data:", data);
+
+  const students = [];
+
+  data.forEach((row, index) => {
+    try {
+      // Mapping kolom dengan berbagai kemungkinan nama
+      const studentData = mapExcelRowToStudent(row, index + 2);
+      if (studentData) {
+        students.push(studentData);
+      }
+    } catch (error) {
+      console.error(`Error processing row ${index + 2}:`, error);
+    }
+  });
+
+  console.log(`Processed ${students.length} students from Excel`);
+  return students;
+}
+
+// Fungsi untuk memproses import siswa
+async function processStudentImport(importedStudents, classList) {
+  let connection;
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    connection = await getConnection();
+
+    for (const studentData of importedStudents) {
+      try {
+        // Validasi data required
+        if (!studentData.nis || !studentData.nama || !studentData.kelas_nama) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${studentData.row_number}: Data required tidak lengkap`
+          );
+          continue;
+        }
+
+        // Cari kelas_id berdasarkan nama kelas
+        const classItem = classList.find(
+          (cls) =>
+            cls.nama.toLowerCase() === studentData.kelas_nama.toLowerCase()
+        );
+
+        if (!classItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${studentData.row_number}: Kelas '${studentData.kelas_nama}' tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cek NIS duplikat
+        const [existingNIS] = await connection.execute(
+          "SELECT id FROM siswa WHERE nis = ?",
+          [studentData.nis]
+        );
+
+        if (existingNIS.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${studentData.row_number}: NIS '${studentData.nis}' sudah terdaftar`
+          );
+          continue;
+        }
+
+        // Mulai transaction untuk siswa ini
+        await connection.beginTransaction();
+
+        try {
+          const studentId = crypto.randomUUID();
+          const createdAt = new Date()
+            .toISOString()
+            .slice(0, 19)
+            .replace("T", " ");
+          const updatedAt = createdAt;
+
+          // Insert siswa
+          await connection.execute(
+            "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+              studentId,
+              studentData.nis,
+              studentData.nama,
+              classItem.id,
+              studentData.alamat,
+              studentData.tanggal_lahir,
+              studentData.jenis_kelamin,
+              studentData.nama_wali,
+              studentData.no_telepon,
+              createdAt,
+              updatedAt,
+            ]
+          );
+
+          // Buat user wali jika email disediakan
+          if (studentData.email_wali && studentData.nama_wali) {
+            // Cek apakah email sudah terdaftar
+            const [existingUsers] = await connection.execute(
+              "SELECT id FROM users WHERE email = ?",
+              [studentData.email_wali]
+            );
+
+            if (existingUsers.length === 0) {
+              const waliId = crypto.randomUUID();
+              const password = "password123";
+              const hashedPassword = await bcrypt.hash(password, 10);
+
+              await connection.execute(
+                'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
+                [
+                  waliId,
+                  studentData.nama_wali,
+                  studentData.email_wali,
+                  hashedPassword,
+                  studentId,
+                ]
+              );
+            }
+          }
+
+          // Commit transaction
+          await connection.commit();
+          results.success++;
+        } catch (transactionError) {
+          // Rollback jika ada error
+          await connection.rollback();
+          throw transactionError;
+        }
+      } catch (studentError) {
+        results.failed++;
+        results.errors.push(
+          `Baris ${studentData.row_number}: ${studentError.message}`
+        );
+        console.error(
+          `Error importing student ${studentData.nis}:`,
+          studentError.message
+        );
+      }
+    }
+
+    return results;
+  } catch (error) {
+    throw error;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+}
+
+// Fungsi helper untuk format tanggal
+function formatDate(dateValue) {
+  if (!dateValue) return "";
+
+  // Jika sudah dalam format string
+  if (typeof dateValue === "string") {
+    return dateValue;
+  }
+
+  // Jika dari Excel (number)
+  if (typeof dateValue === "number") {
+    const excelEpoch = new Date(1900, 0, 1);
+    const date = new Date(
+      excelEpoch.getTime() + (dateValue - 1) * 24 * 60 * 60 * 1000
+    );
+    return date.toISOString().slice(0, 10);
+  }
+
+  // Jika Date object
+  if (dateValue instanceof Date) {
+    return dateValue.toISOString().slice(0, 10);
+  }
+
+  return "";
+}
+
+// Download template Excel
+app.get("/api/siswa/template", authenticateToken, async (req, res) => {
+  try {
+    const XLSX = require("xlsx");
+
+    // Data contoh untuk template
+    const templateData = [
+      {
+        nis: "2024001",
+        nama: "John Doe",
+        kelas_nama: "X IPA 1",
+        alamat: "Jl. Contoh No. 123",
+        tanggal_lahir: "2008-05-15",
+        jenis_kelamin: "L",
+        nama_wali: "Robert Doe",
+        no_telepon: "081234567890",
+        email_wali: "robert@example.com",
+      },
+      {
+        nis: "2024002",
+        nama: "Jane Smith",
+        kelas_nama: "X IPA 2",
+        alamat: "Jl. Sample No. 456",
+        tanggal_lahir: "2008-08-20",
+        jenis_kelamin: "P",
+        nama_wali: "Alice Smith",
+        no_telepon: "081298765432",
+        email_wali: "alice@example.com",
+      },
+    ];
+
+    // Buat workbook
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(templateData);
+
+    // Tambahkan worksheet ke workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Template Siswa");
+
+    // Set header
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="template_import_siswa.xlsx"'
+    );
+
+    // Tulis ke response
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.send(buffer);
+  } catch (error) {
+    console.error("ERROR DOWNLOAD TEMPLATE:", error.message);
+    res.status(500).json({ error: "Gagal mendownload template" });
+  }
+});
 
 // Modifikasi endpoint POST siswa dengan transaction yang benar
 app.post("/api/siswa", authenticateToken, async (req, res) => {
@@ -499,13 +2126,13 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       no_telepon,
       email_wali,
     } = req.body;
-    
+
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString().slice(0, 19).replace("T", " ");
     const updatedAt = createdAt;
 
     connection = await getConnection();
-    
+
     // Mulai transaction
     await connection.beginTransaction();
 
@@ -533,29 +2160,29 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       // 2. Buat user wali jika email_wali disediakan
       if (email_wali && nama_wali) {
         console.log("Membuat user wali dengan email:", email_wali);
-        
+
         // Cek apakah email sudah terdaftar
         const [existingUsers] = await connection.execute(
           "SELECT id FROM users WHERE email = ?",
           [email_wali]
         );
-        
+
         if (existingUsers.length > 0) {
           await connection.rollback();
-          return res.status(400).json({ 
-            error: `Email wali '${email_wali}' sudah terdaftar` 
+          return res.status(400).json({
+            error: `Email wali '${email_wali}' sudah terdaftar`,
           });
         }
-        
+
         const waliId = crypto.randomUUID();
         const password = "password123";
         const hashedPassword = await bcrypt.hash(password, 10);
-        
+
         await connection.execute(
           'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
           [waliId, nama_wali, email_wali, hashedPassword, id]
         );
-        
+
         console.log("User wali berhasil dibuat dengan ID:", waliId);
       }
 
@@ -563,19 +2190,19 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       await connection.commit();
       console.log("Transaction committed successfully");
 
-      res.json({ 
-        message: "Siswa berhasil ditambahkan", 
+      res.json({
+        message: "Siswa berhasil ditambahkan",
         id,
-        info: email_wali ? "User wali berhasil dibuat dengan password: password123" : "User wali tidak dibuat (email tidak disediakan)"
+        info: email_wali
+          ? "User wali berhasil dibuat dengan password: password123"
+          : "User wali tidak dibuat (email tidak disediakan)",
       });
-      
     } catch (transactionError) {
       // Rollback jika ada error dalam transaction
       await connection.rollback();
       console.error("Transaction error:", transactionError.message);
       throw transactionError;
     }
-    
   } catch (error) {
     console.error("ERROR POST SISWA:", error.message);
     console.error("SQL Error code:", error.code);
@@ -585,9 +2212,9 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "NIS sudah terdaftar" });
     }
 
-    res.status(500).json({ 
+    res.status(500).json({
       error: "Gagal menambah siswa: " + error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      details: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
   } finally {
     // Pastikan koneksi ditutup
@@ -598,7 +2225,9 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
 });
 
 // Modifikasi endpoint PUT siswa
+// Modifikasi endpoint PUT siswa - PERBAIKAN
 app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
+  let connection;
   try {
     const { id } = req.params;
     console.log("Update siswa:", id, req.body);
@@ -615,7 +2244,7 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
     } = req.body;
     const updatedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
 
-    const connection = await getConnection();
+    connection = await getConnection();
 
     // Mulai transaction
     await connection.beginTransaction();
@@ -668,15 +2297,31 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
             [nama_wali, email_wali, id]
           );
         } else {
-          // Buat user wali baru
-          const waliResult = await createWaliUser(email_wali, nama_wali, id);
-          if (!waliResult.success) {
+          // BUAT USER WALI BARU - INI YANG DIPERBAIKI
+          const waliId = crypto.randomUUID();
+          const password = "password123";
+          const hashedPassword = await bcrypt.hash(password, 10);
+
+          // Cek apakah email sudah terdaftar
+          const [emailCheck] = await connection.execute(
+            "SELECT id FROM users WHERE email = ?",
+            [email_wali]
+          );
+
+          if (emailCheck.length > 0) {
             await connection.rollback();
             await connection.end();
             return res.status(400).json({
-              error: `Gagal membuat user wali: ${waliResult.error}`,
+              error: "Email wali sudah digunakan oleh user lain",
             });
           }
+
+          await connection.execute(
+            'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
+            [waliId, nama_wali, email_wali, hashedPassword, id]
+          );
+
+          console.log("User wali baru berhasil dibuat:", waliId);
         }
       } else if (existingWali.length > 0) {
         // Hapus user wali jika email_wali dihapus
@@ -691,7 +2336,13 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
       await connection.end();
 
       console.log("Siswa berhasil diupdate:", id);
-      res.json({ message: "Siswa berhasil diupdate" });
+      res.json({
+        message: "Siswa berhasil diupdate",
+        info:
+          email_wali && nama_wali
+            ? "User wali berhasil dibuat/diperbarui dengan password: password123"
+            : undefined,
+      });
     } catch (transactionError) {
       await connection.rollback();
       throw transactionError;
@@ -700,11 +2351,15 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
     console.error("ERROR PUT SISWA:", error.message);
     console.error("SQL Error code:", error.code);
 
+    if (connection) {
+      await connection.end();
+    }
+
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(400).json({ error: "NIS sudah terdaftar" });
     }
 
-    res.status(500).json({ error: "Gagal mengupdate siswa" });
+    res.status(500).json({ error: "Gagal mengupdate siswa: " + error.message });
   }
 });
 
@@ -790,6 +2445,556 @@ app.get("/api/mata-pelajaran", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Gagal mengambil data mata pelajaran" });
   }
 });
+
+app.post('/api/export-subjects', async (req, res) => {
+  try {
+    const { subjects } = req.body;
+
+    if (!subjects || !Array.isArray(subjects)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data mata pelajaran tidak valid'
+      });
+    }
+
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+    
+    // Prepare data for Excel
+    const excelData = [
+      // Header row
+      ['Kode*', 'Nama*', 'Deskripsi', 'Kelas', 'Status'],
+      // Data rows
+      ...subjects.map(subject => [
+        subject.kode || '',
+        subject.nama || '',
+        subject.deskripsi || '',
+        getClassNames(subject),
+        'Active'
+      ])
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+    // Add style to header row (basic styling)
+    if (!worksheet['!cols']) worksheet['!cols'] = [];
+    for (let i = 0; i < 5; i++) {
+      worksheet['!cols'][i] = { width: 15 };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data Mata Pelajaran');
+
+    // Generate filename
+    const filename = `Data_Mata_Pelajaran_${Date.now()}.xlsx`;
+    const filePath = path.join(__dirname, '../temp', filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
+      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error('Error downloading file:', err);
+        res.status(500).json({
+          success: false,
+          message: 'Gagal mengunduh file'
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+
+  } catch (error) {
+    console.error('Export subjects error:', error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengexport data: ${error.message}`
+    });
+  }
+});
+
+// Download template Excel untuk mata pelajaran
+app.get('/api/download-subject-template', async (req, res) => {
+  try {
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+    
+    // Prepare template data
+    const templateData = [
+      // Header row
+      ['Kode', 'Nama', 'Deskripsi', 'Kelas'],
+      // Example data
+      ['BI-7', 'Bahasa Indonesia', 'Bahasa Indonesia untuk kelas 7', '7A'],
+      ['BIN-7', 'Bahasa Inggris', 'Bahasa Inggris untuk kelas 7', '7A'],
+      ['MTK-7', 'Matematika', 'Matematika untuk kelas 7', '7A,7B'],
+      ['IPA-7', 'Ilmu Pengetahuan Alam', 'IPA untuk kelas 7', '7A,7B,7C'],
+      // Empty row
+      [],
+      // Notes
+      ['* Wajib diisi'],
+      ['Kelas: Pisahkan dengan koma jika multiple'],
+      ['Contoh: 7A,7B,8A']
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(templateData);
+
+    // Set column widths
+    if (!worksheet['!cols']) worksheet['!cols'] = [];
+    for (let i = 0; i < 4; i++) {
+      worksheet['!cols'][i] = { width: 20 };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Template Mata Pelajaran');
+
+    // Generate filename
+    const filename = 'Template_Import_Mata_Pelajaran.xlsx';
+    const filePath = path.join(__dirname, '../temp', filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
+      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error('Error downloading template:', err);
+        res.status(500).json({
+          success: false,
+          message: 'Gagal mengunduh template'
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+
+  } catch (error) {
+    console.error('Subject template download error:', error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengunduh template: ${error.message}`
+    });
+  }
+});
+
+app.post('/api/validate-subjects', async (req, res) => {
+  try {
+    const { subjects } = req.body;
+
+    if (!subjects || !Array.isArray(subjects)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data mata pelajaran tidak valid'
+      });
+    }
+
+    const validatedData = [];
+    const errors = [];
+
+    for (let i = 0; i < subjects.length; i++) {
+      const subject = subjects[i];
+      const validatedSubject = {};
+      let hasError = false;
+
+      // Validasi field required
+      if (!subject.kode || subject.kode.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Kode mata pelajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSubject.kode = subject.kode.toString().trim();
+      }
+
+      if (!subject.nama || subject.nama.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Nama mata pelajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSubject.nama = subject.nama.toString().trim();
+      }
+
+      // Field optional
+      validatedSubject.deskripsi = subject.deskripsi || '';
+      validatedSubject.kelas = subject.kelas || '';
+
+      if (!hasError) {
+        validatedData.push(validatedSubject);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validasi data gagal',
+        errors: errors,
+        validatedData: validatedData
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Validasi data berhasil',
+      validatedData: validatedData
+    });
+
+  } catch (error) {
+    console.error('Subject validation error:', error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal validasi data: ${error.message}`
+    });
+  }
+});
+
+function getClassNames(subject) {
+  if (subject.kelas_names) {
+    return subject.kelas_names;
+  }
+  
+  if (subject.kelas_list && Array.isArray(subject.kelas_list)) {
+    return subject.kelas_list.map(kelas => kelas.nama || '').join(', ');
+  }
+  
+  return '';
+}
+
+// Import mata pelajaran dari Excel
+app.post(
+  "/api/mata-pelajaran/import",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    let connection;
+    try {
+      console.log("Import mata pelajaran dari Excel (memory storage)");
+
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("File received in memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        bufferLength: req.file.buffer.length,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const importedSubjects = await readExcelSubjectsFromBuffer(
+        req.file.buffer
+      );
+
+      if (importedSubjects.length === 0) {
+        return res.status(400).json({
+          error:
+            "Tidak ada data mata pelajaran yang valid ditemukan dalam file",
+        });
+      }
+
+      console.log(`Found ${importedSubjects.length} subjects to import`);
+
+      // Ambil data kelas untuk mapping
+      connection = await getConnection();
+      const [classList] = await connection.execute(
+        "SELECT id, nama FROM kelas"
+      );
+      await connection.end();
+
+      // Proses import
+      const result = await processSubjectImport(importedSubjects, classList);
+
+      console.log("Import completed:", result);
+      res.json({
+        message: "Import selesai",
+        ...result,
+      });
+    } catch (error) {
+      if (connection) {
+        await connection.end();
+      }
+
+      console.error("ERROR IMPORT MATA PELAJARAN:", error.message);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Gagal mengimport mata pelajaran: " + error.message,
+      });
+    }
+  }
+);
+
+// Fungsi untuk membaca Excel mata pelajaran dari buffer
+async function readExcelSubjectsFromBuffer(buffer) {
+  const XLSX = require("xlsx");
+
+  // Baca workbook langsung dari buffer
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+
+  // Konversi ke JSON
+  const data = XLSX.utils.sheet_to_json(worksheet);
+
+  console.log("Raw Excel data from buffer:", data);
+
+  const subjects = [];
+
+  data.forEach((row, index) => {
+    try {
+      // Mapping kolom dengan berbagai kemungkinan nama
+      const subjectData = mapExcelRowToSubject(row, index + 2);
+      if (subjectData) {
+        subjects.push(subjectData);
+      }
+    } catch (error) {
+      console.error(`Error processing row ${index + 2}:`, error);
+    }
+  });
+
+  console.log(`Processed ${subjects.length} subjects from Excel buffer`);
+  return subjects;
+}
+
+// Fungsi mapping row untuk mata pelajaran
+function mapExcelRowToSubject(row, rowNumber) {
+  // Normalize keys to lowercase for case-insensitive matching
+  const normalizedRow = {};
+  Object.keys(row).forEach((key) => {
+    normalizedRow[key.toLowerCase().trim()] = row[key];
+  });
+
+  console.log(`Processing row ${rowNumber}:`, normalizedRow);
+
+  // Mapping berbagai kemungkinan nama kolom
+  const kode =
+    normalizedRow["kode"] ||
+    normalizedRow["code"] ||
+    normalizedRow["kode mata pelajaran"] ||
+    normalizedRow["subject code"] ||
+    "";
+
+  const nama =
+    normalizedRow["nama"] ||
+    normalizedRow["name"] ||
+    normalizedRow["nama mata pelajaran"] ||
+    normalizedRow["subject name"] ||
+    normalizedRow["mata pelajaran"] ||
+    "";
+
+  // Jika data required tidak ada, skip
+  if (!kode || !nama) {
+    console.log(`Skipping row ${rowNumber}: Missing required data`, {
+      kode,
+      nama,
+    });
+    return null;
+  }
+
+  // Mapping lainnya
+  const deskripsi =
+    normalizedRow["deskripsi"] ||
+    normalizedRow["description"] ||
+    normalizedRow["deskripsi mata pelajaran"] ||
+    normalizedRow["subject description"] ||
+    "";
+
+  const kelasNames =
+    normalizedRow["kelas"] ||
+    normalizedRow["class"] ||
+    normalizedRow["kelas names"] ||
+    normalizedRow["classes"] ||
+    normalizedRow["nama kelas"] ||
+    "";
+
+  const subject = {
+    kode: kode.toString().trim(),
+    nama: nama.toString().trim(),
+    deskripsi: deskripsi.toString().trim(),
+    kelas_names: kelasNames.toString().trim(),
+    row_number: rowNumber,
+  };
+
+  console.log(`Mapped subject data for row ${rowNumber}:`, subject);
+  return subject;
+}
+
+// Fungsi processSubjectImport
+async function processSubjectImport(importedSubjects, classList) {
+  let connection;
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    connection = await getConnection();
+
+    for (const subjectData of importedSubjects) {
+      try {
+        // Validasi data required
+        if (!subjectData.kode || !subjectData.nama) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${subjectData.row_number}: Data required tidak lengkap`
+          );
+          continue;
+        }
+
+        // Cek kode duplikat
+        const [existingKode] = await connection.execute(
+          "SELECT id FROM mata_pelajaran WHERE kode = ?",
+          [subjectData.kode]
+        );
+
+        if (existingKode.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${subjectData.row_number}: Kode '${subjectData.kode}' sudah terdaftar`
+          );
+          continue;
+        }
+
+        // Mulai transaction untuk mata pelajaran ini
+        await connection.beginTransaction();
+
+        try {
+          const subjectId = crypto.randomUUID();
+          const createdAt = new Date()
+            .toISOString()
+            .slice(0, 19)
+            .replace("T", " ");
+          const updatedAt = createdAt;
+
+          // Insert mata pelajaran
+          await connection.execute(
+            "INSERT INTO mata_pelajaran (id, kode, nama, deskripsi, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+              subjectId,
+              subjectData.kode,
+              subjectData.nama,
+              subjectData.deskripsi,
+              createdAt,
+              updatedAt,
+            ]
+          );
+
+          // Tambahkan relasi kelas jika disediakan
+          if (subjectData.kelas_names) {
+            const kelasItems = subjectData.kelas_names
+              .split(",")
+              .map((item) => item.trim())
+              .filter((item) => item !== "");
+
+            for (const kelasNama of kelasItems) {
+              const classItem = classList.find(
+                (cls) => cls.nama.toLowerCase() === kelasNama.toLowerCase()
+              );
+
+              if (classItem) {
+                const relationId = crypto.randomUUID();
+                await connection.execute(
+                  "INSERT INTO mata_pelajaran_kelas (id, mata_pelajaran_id, kelas_id) VALUES (?, ?, ?)",
+                  [relationId, subjectId, classItem.id]
+                );
+              }
+            }
+          }
+
+          // Commit transaction
+          await connection.commit();
+          results.success++;
+        } catch (transactionError) {
+          // Rollback jika ada error
+          await connection.rollback();
+          throw transactionError;
+        }
+      } catch (subjectError) {
+        results.failed++;
+        results.errors.push(
+          `Baris ${subjectData.row_number}: ${subjectError.message}`
+        );
+        console.error(
+          `Error importing subject ${subjectData.kode}:`,
+          subjectError.message
+        );
+      }
+    }
+
+    return results;
+  } catch (error) {
+    throw error;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+}
+
+// Debug endpoint untuk melihat data Excel mata pelajaran
+app.post(
+  "/api/debug/excel-mata-pelajaran",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("Debug Excel file from memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const XLSX = require("xlsx");
+      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+
+      // Dapatkan semua data
+      const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+      const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+      res.json({
+        sheet_name: sheetName,
+        headers: rawData[0] || [],
+        raw_data: rawData,
+        json_data: jsonData,
+        total_rows: rawData.length,
+        file_info: {
+          originalname: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+        },
+      });
+    } catch (error) {
+      console.error("DEBUG EXCEL MATA PELAJARAN ERROR:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
 
 // Get Mata Pelajaran by ID
 app.get("/api/mata-pelajaran/:id", authenticateToken, async (req, res) => {
@@ -942,6 +3147,451 @@ app.get("/api/guru/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Gagal mengambil data guru" });
   }
 });
+
+// Endpoint untuk download template guru
+app.get("/api/guru/template", authenticateToken, async (req, res) => {
+  try {
+    const XLSX = require("xlsx");
+
+    // Data contoh untuk template guru
+    const templateData = [
+      {
+        nip: "198001012000121001",
+        nama: "Budi Santoso",
+        email: "budi.santoso@sekolah.sch.id",
+        mata_pelajaran_nama: "Matematika",
+        kelas_nama: "X IPA 1",
+        no_telepon: "081234567890",
+        is_wali_kelas: "Ya",
+      },
+      {
+        nip: "198002022000122002",
+        nama: "Siti Rahayu",
+        email: "siti.rahayu@sekolah.sch.id",
+        mata_pelajaran_nama: "Bahasa Indonesia",
+        kelas_nama: "X IPA 2",
+        no_telepon: "081298765432",
+        is_wali_kelas: "Tidak",
+      },
+    ];
+
+    // Buat workbook
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(templateData);
+
+    // Tambahkan worksheet ke workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Template Guru");
+
+    // Set header
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="template_import_guru.xlsx"'
+    );
+
+    // Tulis ke response
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.send(buffer);
+  } catch (error) {
+    console.error("ERROR DOWNLOAD TEMPLATE GURU:", error.message);
+    res.status(500).json({ error: "Gagal mendownload template guru" });
+  }
+});
+
+// Import guru dari Excel
+app.post(
+  "/api/guru/import",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    let connection;
+    try {
+      console.log("Import guru dari Excel (memory storage)");
+
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("File received in memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        bufferLength: req.file.buffer.length,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const importedTeachers = await readExcelTeachersFromBuffer(
+        req.file.buffer
+      );
+
+      if (importedTeachers.length === 0) {
+        return res.status(400).json({
+          error: "Tidak ada data guru yang valid ditemukan dalam file",
+        });
+      }
+
+      console.log(`Found ${importedTeachers.length} teachers to import`);
+
+      // Ambil data kelas dan mata pelajaran untuk mapping
+      connection = await getConnection();
+      const [classList] = await connection.execute(
+        "SELECT id, nama FROM kelas"
+      );
+      const [subjectList] = await connection.execute(
+        "SELECT id, nama FROM mata_pelajaran"
+      );
+      await connection.end();
+
+      // Proses import
+      const result = await processTeacherImport(
+        importedTeachers,
+        classList,
+        subjectList
+      );
+
+      console.log("Import completed:", result);
+      res.json({
+        message: "Import selesai",
+        ...result,
+      });
+    } catch (error) {
+      if (connection) {
+        await connection.end();
+      }
+
+      console.error("ERROR IMPORT GURU:", error.message);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Gagal mengimport guru: " + error.message,
+      });
+    }
+  }
+);
+
+// Fungsi untuk membaca Excel guru dari buffer
+async function readExcelTeachersFromBuffer(buffer) {
+  const XLSX = require("xlsx");
+
+  // Baca workbook langsung dari buffer
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+
+  // Konversi ke JSON
+  const data = XLSX.utils.sheet_to_json(worksheet);
+
+  console.log("Raw Excel data from buffer:", data);
+
+  const teachers = [];
+
+  data.forEach((row, index) => {
+    try {
+      // Mapping kolom dengan berbagai kemungkinan nama
+      const teacherData = mapExcelRowToTeacher(row, index + 2);
+      if (teacherData) {
+        teachers.push(teacherData);
+      }
+    } catch (error) {
+      console.error(`Error processing row ${index + 2}:`, error);
+    }
+  });
+
+  console.log(`Processed ${teachers.length} teachers from Excel buffer`);
+  return teachers;
+}
+
+// Fungsi mapping row untuk guru
+function mapExcelRowToTeacher(row, rowNumber) {
+  // Normalize keys to lowercase for case-insensitive matching
+  const normalizedRow = {};
+  Object.keys(row).forEach((key) => {
+    normalizedRow[key.toLowerCase().trim()] = row[key];
+  });
+
+  console.log(`Processing row ${rowNumber}:`, normalizedRow);
+
+  // Mapping berbagai kemungkinan nama kolom
+  const nip =
+    normalizedRow["nip"] ||
+    normalizedRow["nomor induk pegawai"] ||
+    normalizedRow["no induk pegawai"] ||
+    normalizedRow["nomor induk"] ||
+    "";
+
+  const nama =
+    normalizedRow["nama"] ||
+    normalizedRow["name"] ||
+    normalizedRow["nama guru"] ||
+    normalizedRow["nama lengkap"] ||
+    "";
+
+  const email =
+    normalizedRow["email"] ||
+    normalizedRow["email guru"] ||
+    normalizedRow["alamat email"] ||
+    "";
+
+  const mataPelajaranNama =
+    normalizedRow["mata_pelajaran_nama"] ||
+    normalizedRow["mata pelajaran"] ||
+    normalizedRow["pelajaran"] ||
+    normalizedRow["subject"] ||
+    "";
+
+  const kelasNama =
+    normalizedRow["kelas_nama"] ||
+    normalizedRow["kelas"] ||
+    normalizedRow["class"] ||
+    normalizedRow["nama kelas"] ||
+    "";
+
+  // Jika data required tidak ada, skip
+  if (!nip || !nama || !email) {
+    console.log(`Skipping row ${rowNumber}: Missing required data`, {
+      nip,
+      nama,
+      email,
+    });
+    return null;
+  }
+
+  // Mapping is_wali_kelas
+  let isWaliKelas = false;
+  const waliKelasValue =
+    normalizedRow["is_wali_kelas"] ||
+    normalizedRow["wali kelas"] ||
+    normalizedRow["is_wali"] ||
+    normalizedRow["homeroom teacher"] ||
+    "";
+
+  if (waliKelasValue) {
+    const normalizedWali = waliKelasValue.toString().toLowerCase().trim();
+    if (
+      normalizedWali.includes("ya") ||
+      normalizedWali === "y" ||
+      normalizedWali === "yes" ||
+      normalizedWali === "true" ||
+      normalizedWali === "1"
+    ) {
+      isWaliKelas = true;
+    }
+  }
+
+  // Mapping lainnya
+  const noTelepon =
+    normalizedRow["no_telepon"] ||
+    normalizedRow["no telepon"] ||
+    normalizedRow["telepon"] ||
+    normalizedRow["phone"] ||
+    normalizedRow["nomor telepon"] ||
+    "";
+
+  const teacher = {
+    nip: nip.toString().trim(),
+    nama: nama.toString().trim(),
+    email: email.toString().trim(),
+    mata_pelajaran_nama: mataPelajaranNama.toString().trim(),
+    kelas_nama: kelasNama.toString().trim(),
+    no_telepon: noTelepon.toString().trim(),
+    is_wali_kelas: isWaliKelas,
+    row_number: rowNumber,
+  };
+
+  console.log(`Mapped teacher data for row ${rowNumber}:`, teacher);
+  return teacher;
+}
+
+// Fungsi processTeacherImport
+async function processTeacherImport(importedTeachers, classList, subjectList) {
+  let connection;
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    connection = await getConnection();
+
+    for (const teacherData of importedTeachers) {
+      try {
+        // Validasi data required
+        if (!teacherData.nip || !teacherData.nama || !teacherData.email) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${teacherData.row_number}: Data required tidak lengkap`
+          );
+          continue;
+        }
+
+        // Cek NIP duplikat
+        const [existingNIP] = await connection.execute(
+          "SELECT id FROM users WHERE nip = ? AND role = 'guru'",
+          [teacherData.nip]
+        );
+
+        if (existingNIP.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${teacherData.row_number}: NIP '${teacherData.nip}' sudah terdaftar`
+          );
+          continue;
+        }
+
+        // Cek email duplikat
+        const [existingEmail] = await connection.execute(
+          "SELECT id FROM users WHERE email = ?",
+          [teacherData.email]
+        );
+
+        if (existingEmail.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${teacherData.row_number}: Email '${teacherData.email}' sudah terdaftar`
+          );
+          continue;
+        }
+
+        // Cari kelas_id berdasarkan nama kelas (jika ada)
+        let kelasId = null;
+        if (teacherData.kelas_nama) {
+          const classItem = classList.find(
+            (cls) =>
+              cls.nama.toLowerCase() === teacherData.kelas_nama.toLowerCase()
+          );
+
+          if (!classItem) {
+            results.failed++;
+            results.errors.push(
+              `Baris ${teacherData.row_number}: Kelas '${teacherData.kelas_nama}' tidak ditemukan`
+            );
+            continue;
+          }
+          kelasId = classItem.id;
+        }
+
+        // Mulai transaction untuk guru ini
+        await connection.beginTransaction();
+
+        try {
+          const teacherId = crypto.randomUUID();
+          const password = "password123";
+          const hashedPassword = await bcrypt.hash(password, 10);
+
+          // Insert guru
+          await connection.execute(
+            "INSERT INTO users (id, nama, email, password, role, nip, kelas_id, is_wali_kelas, no_telepon) VALUES (?, ?, ?, ?, 'guru', ?, ?, ?, ?)",
+            [
+              teacherId,
+              teacherData.nama,
+              teacherData.email,
+              hashedPassword,
+              teacherData.nip,
+              kelasId,
+              teacherData.is_wali_kelas,
+              teacherData.no_telepon || "",
+            ]
+          );
+
+          // Tambahkan mata pelajaran jika disediakan
+          if (teacherData.mata_pelajaran_nama) {
+            const mataPelajaranItems = teacherData.mata_pelajaran_nama
+              .split(",")
+              .map((item) => item.trim());
+
+            for (const mpNama of mataPelajaranItems) {
+              const subjectItem = subjectList.find(
+                (subj) => subj.nama.toLowerCase() === mpNama.toLowerCase()
+              );
+
+              if (subjectItem) {
+                const relationId = crypto.randomUUID();
+                await connection.execute(
+                  "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id) VALUES (?, ?, ?)",
+                  [relationId, teacherId, subjectItem.id]
+                );
+              }
+            }
+          }
+
+          // Commit transaction
+          await connection.commit();
+          results.success++;
+        } catch (transactionError) {
+          // Rollback jika ada error
+          await connection.rollback();
+          throw transactionError;
+        }
+      } catch (teacherError) {
+        results.failed++;
+        results.errors.push(
+          `Baris ${teacherData.row_number}: ${teacherError.message}`
+        );
+        console.error(
+          `Error importing teacher ${teacherData.nip}:`,
+          teacherError.message
+        );
+      }
+    }
+
+    return results;
+  } catch (error) {
+    throw error;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+}
+
+// Debug endpoint untuk melihat data Excel guru
+app.post(
+  "/api/debug/excel-guru",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("Debug Excel file from memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const XLSX = require("xlsx");
+      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+
+      // Dapatkan semua data
+      const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+      const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+      res.json({
+        sheet_name: sheetName,
+        headers: rawData[0] || [],
+        raw_data: rawData,
+        json_data: jsonData,
+        total_rows: rawData.length,
+        file_info: {
+          originalname: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+        },
+      });
+    } catch (error) {
+      console.error("DEBUG EXCEL GURU ERROR:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
 
 app.post("/api/guru", authenticateToken, async (req, res) => {
   try {
@@ -2260,6 +4910,780 @@ app.get("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
   }
 });
 
+// Fungsi untuk membaca Excel jadwal mengajar dari buffer
+async function readExcelSchedulesFromBuffer(buffer) {
+  const XLSX = require("xlsx");
+
+  // Baca workbook langsung dari buffer
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+
+  // Konversi ke JSON
+  const data = XLSX.utils.sheet_to_json(worksheet);
+
+  console.log("Raw Excel schedule data from buffer:", data);
+
+  const schedules = [];
+
+  data.forEach((row, index) => {
+    try {
+      // Mapping kolom dengan berbagai kemungkinan nama
+      const scheduleData = mapExcelRowToSchedule(row, index + 2);
+      if (scheduleData) {
+        schedules.push(scheduleData);
+      }
+    } catch (error) {
+      console.error(`Error processing row ${index + 2}:`, error);
+    }
+  });
+
+  console.log(`Processed ${schedules.length} schedules from Excel buffer`);
+  return schedules;
+}
+
+// Fungsi mapping row untuk jadwal mengajar
+function mapExcelRowToSchedule(row, rowNumber) {
+  // Normalize keys to lowercase for case-insensitive matching
+  const normalizedRow = {};
+  Object.keys(row).forEach((key) => {
+    normalizedRow[key.toLowerCase().trim()] = row[key];
+  });
+
+  console.log(`Processing schedule row ${rowNumber}:`, normalizedRow);
+
+  // Mapping berbagai kemungkinan nama kolom
+  const guruNama =
+    normalizedRow["guru_nama"] ||
+    normalizedRow["nama guru"] ||
+    normalizedRow["guru"] ||
+    normalizedRow["teacher"] ||
+    normalizedRow["teacher name"] ||
+    "";
+
+  const mataPelajaranNama =
+    normalizedRow["mata_pelajaran_nama"] ||
+    normalizedRow["mata pelajaran"] ||
+    normalizedRow["pelajaran"] ||
+    normalizedRow["subject"] ||
+    normalizedRow["subject name"] ||
+    "";
+
+  const kelasNama =
+    normalizedRow["kelas_nama"] ||
+    normalizedRow["kelas"] ||
+    normalizedRow["class"] ||
+    normalizedRow["nama kelas"] ||
+    normalizedRow["class name"] ||
+    "";
+
+  const hariNama =
+    normalizedRow["hari_nama"] ||
+    normalizedRow["hari"] ||
+    normalizedRow["day"] ||
+    normalizedRow["nama hari"] ||
+    "";
+
+  const jamKe =
+    normalizedRow["jam ke"] ||
+    normalizedRow["jam"] ||
+    normalizedRow["period"] ||
+    normalizedRow["jam pelajaran"] ||
+    "";
+
+  const semesterNama =
+    normalizedRow["semester_nama"] ||
+    normalizedRow["semester"] ||
+    normalizedRow["semester name"] ||
+    "";
+
+  const tahunAjaran =
+    normalizedRow["tahun_ajaran"] ||
+    normalizedRow["tahun ajaran"] ||
+    normalizedRow["academic year"] ||
+    normalizedRow["tahun"] ||
+    "";
+
+  // Jika data required tidak ada, skip
+  if (
+    !guruNama ||
+    !mataPelajaranNama ||
+    !kelasNama ||
+    !hariNama ||
+    !jamKe ||
+    !semesterNama ||
+    !tahunAjaran
+  ) {
+    console.log(`Skipping schedule row ${rowNumber}: Missing required data`, {
+      guruNama,
+      mataPelajaranNama,
+      kelasNama,
+      hariNama,
+      jamKe,
+      semesterNama,
+      tahunAjaran,
+    });
+    return null;
+  }
+
+  const schedule = {
+    guru_nama: guruNama.toString().trim(),
+    mata_pelajaran_nama: mataPelajaranNama.toString().trim(),
+    kelas_nama: kelasNama.toString().trim(),
+    hari_nama: hariNama.toString().trim(),
+    jam_ke: jamKe.toString().trim(),
+    semester_nama: semesterNama.toString().trim(),
+    tahun_ajaran: tahunAjaran.toString().trim(),
+    row_number: rowNumber,
+  };
+
+  console.log(`Mapped schedule data for row ${rowNumber}:`, schedule);
+  return schedule;
+}
+
+// Fungsi processScheduleImport
+async function processScheduleImport(
+  importedSchedules,
+  teacherList,
+  subjectList,
+  classList,
+  dayList,
+  semesterList,
+  periodList
+) {
+  let connection;
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    connection = await getConnection();
+
+    for (const scheduleData of importedSchedules) {
+      try {
+        // Validasi data required
+        if (
+          !scheduleData.guru_nama ||
+          !scheduleData.mata_pelajaran_nama ||
+          !scheduleData.kelas_nama ||
+          !scheduleData.hari_nama ||
+          !scheduleData.jam_ke ||
+          !scheduleData.semester_nama ||
+          !scheduleData.tahun_ajaran
+        ) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Data required tidak lengkap`
+          );
+          continue;
+        }
+
+        // Cari guru berdasarkan nama
+        const teacherItem = teacherList.find(
+          (teacher) =>
+            teacher.nama.toLowerCase() === scheduleData.guru_nama.toLowerCase()
+        );
+
+        if (!teacherItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Guru '${scheduleData.guru_nama}' tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cari mata pelajaran berdasarkan nama
+        const subjectItem = subjectList.find(
+          (subject) =>
+            subject.nama.toLowerCase() ===
+            scheduleData.mata_pelajaran_nama.toLowerCase()
+        );
+
+        if (!subjectItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Mata pelajaran '${scheduleData.mata_pelajaran_nama}' tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cari kelas berdasarkan nama
+        const classItem = classList.find(
+          (cls) =>
+            cls.nama.toLowerCase() === scheduleData.kelas_nama.toLowerCase()
+        );
+
+        if (!classItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Kelas '${scheduleData.kelas_nama}' tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cari hari berdasarkan nama
+        const dayItem = dayList.find(
+          (day) =>
+            day.nama.toLowerCase() === scheduleData.hari_nama.toLowerCase()
+        );
+
+        if (!dayItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Hari '${scheduleData.hari_nama}' tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cari semester berdasarkan nama
+        const semesterItem = semesterList.find(
+          (semester) =>
+            semester.nama
+              .toLowerCase()
+              .includes(scheduleData.semester_nama.toLowerCase()) ||
+            scheduleData.semester_nama
+              .toLowerCase()
+              .includes(semester.nama.toLowerCase())
+        );
+
+        if (!semesterItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Semester '${scheduleData.semester_nama}' tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cari jam pelajaran berdasarkan jam_ke
+        const periodItem = periodList.find(
+          (period) =>
+            period.jam_ke.toString() === scheduleData.jam_ke.toString()
+        );
+
+        if (!periodItem) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Jam ke-${scheduleData.jam_ke} tidak ditemukan`
+          );
+          continue;
+        }
+
+        // Cek apakah jadwal sudah ada (untuk menghindari duplikasi)
+        const [existingSchedule] = await connection.execute(
+          `SELECT id FROM jadwal_mengajar 
+           WHERE guru_id = ? AND mata_pelajaran_id = ? AND kelas_id = ? 
+           AND hari_id = ? AND jam_pelajaran_id = ? AND semester_id = ? AND tahun_ajaran = ?`,
+          [
+            teacherItem.id,
+            subjectItem.id,
+            classItem.id,
+            dayItem.id,
+            periodItem.id,
+            semesterItem.id,
+            scheduleData.tahun_ajaran,
+          ]
+        );
+
+        if (existingSchedule.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Jadwal sudah ada untuk kombinasi ini`
+          );
+          continue;
+        }
+
+        // Cek konflik jadwal - guru
+        const [teacherConflict] = await connection.execute(
+          `SELECT id FROM jadwal_mengajar 
+           WHERE guru_id = ? AND hari_id = ? AND jam_pelajaran_id = ? 
+           AND semester_id = ? AND tahun_ajaran = ?`,
+          [
+            teacherItem.id,
+            dayItem.id,
+            periodItem.id,
+            semesterItem.id,
+            scheduleData.tahun_ajaran,
+          ]
+        );
+
+        if (teacherConflict.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Guru sudah memiliki jadwal lain di jam yang sama`
+          );
+          continue;
+        }
+
+        // Cek konflik jadwal - kelas
+        const [classConflict] = await connection.execute(
+          `SELECT id FROM jadwal_mengajar 
+           WHERE kelas_id = ? AND hari_id = ? AND jam_pelajaran_id = ? 
+           AND semester_id = ? AND tahun_ajaran = ?`,
+          [
+            classItem.id,
+            dayItem.id,
+            periodItem.id,
+            semesterItem.id,
+            scheduleData.tahun_ajaran,
+          ]
+        );
+
+        if (classConflict.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${scheduleData.row_number}: Kelas sudah memiliki jadwal lain di jam yang sama`
+          );
+          continue;
+        }
+
+        // Mulai transaction untuk jadwal ini
+        await connection.beginTransaction();
+
+        try {
+          const scheduleId = crypto.randomUUID();
+
+          // Insert jadwal mengajar
+          await connection.execute(
+            `INSERT INTO jadwal_mengajar 
+             (id, guru_id, mata_pelajaran_id, kelas_id, hari_id, jam_pelajaran_id, semester_id, tahun_ajaran) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              scheduleId,
+              teacherItem.id,
+              subjectItem.id,
+              classItem.id,
+              dayItem.id,
+              periodItem.id,
+              semesterItem.id,
+              scheduleData.tahun_ajaran,
+            ]
+          );
+
+          // Commit transaction
+          await connection.commit();
+          results.success++;
+        } catch (transactionError) {
+          // Rollback jika ada error
+          await connection.rollback();
+          throw transactionError;
+        }
+      } catch (scheduleError) {
+        results.failed++;
+        results.errors.push(
+          `Baris ${scheduleData.row_number}: ${scheduleError.message}`
+        );
+        console.error(
+          `Error importing schedule for ${scheduleData.guru_nama}:`,
+          scheduleError.message
+        );
+      }
+    }
+
+    return results;
+  } catch (error) {
+    throw error;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+}
+
+app.post("/api/export-schedules", async (req, res) => {
+  try {
+    const { schedules } = req.body;
+
+    if (!schedules || !Array.isArray(schedules)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data jadwal tidak valid",
+      });
+    }
+
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Prepare data for Excel
+    const excelData = [
+      // Header row
+      [
+        "Guru",
+        "Mata Pelajaran",
+        "Kelas",
+        "Hari",
+        "Jam Ke",
+        "Semester",
+        "Tahun Ajaran",
+        "Jam Mulai",
+        "Jam Selesai",
+      ],
+      // Data rows
+      ...schedules.map((schedule) => [
+        schedule.guru_nama || "",
+        schedule.mata_pelajaran_nama || "",
+        schedule.kelas_nama || "",
+        schedule.hari_nama || "",
+        schedule.jam_ke?.toString() || "",
+        schedule.semester_nama || "",
+        schedule.tahun_ajaran || "",
+        schedule.jam_mulai || "",
+        schedule.jam_selesai || "",
+      ]),
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+    // Add style to header row
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    for (let i = 0; i < 9; i++) {
+      worksheet["!cols"][i] = { width: 15 };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data Jadwal Mengajar");
+
+    // Generate filename
+    const filename = `Data_Jadwal_Mengajar_${Date.now()}.xlsx`;
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading file:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh file",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    console.error("Export error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengexport data: ${error.message}`,
+    });
+  }
+});
+
+// Download template Excel untuk jadwal mengajar
+app.get("/api/download-template-schedule", async (req, res) => {
+  try {
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Prepare template data
+    const templateData = [
+      // Header row
+      [
+        "Guru",
+        "Mata Pelajaran",
+        "Kelas",
+        "Hari",
+        "Jam Ke",
+        "Semester",
+        "Tahun Ajaran",
+      ],
+      // Example data
+      [
+        "Budi Santoso",
+        "Ilmu Pengetahuan Alam 7",
+        "7A",
+        "Senin",
+        "1",
+        "Ganjil",
+        "2024/2025",
+      ],
+      ["Sari Dewi", "Matematika 7", "7B", "Selasa", "2", "Ganjil", "2024/2025"],
+      // Empty row
+      [],
+      // Notes
+      ["Catatan:"],
+      ["* Wajib diisi"],
+      [
+        "- Pastikan nama guru, mata pelajaran, kelas, dan hari sesuai dengan data yang ada di sistem",
+      ],
+      ["- Jam ke harus sesuai dengan data jam pelajaran yang tersedia (1-10)"],
+      ["- Format tahun ajaran: YYYY/YYYY (contoh: 2024/2025)"],
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(templateData);
+
+    // Set column widths
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    for (let i = 0; i < 7; i++) {
+      worksheet["!cols"][i] = { width: 20 };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      "Template Jadwal Mengajar"
+    );
+
+    // Generate filename
+    const filename = "Template_Import_Jadwal_Mengajar.xlsx";
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading template:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh template",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    console.error("Template download error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengunduh template: ${error.message}`,
+    });
+  }
+});
+
+// Validasi data jadwal sebelum import
+app.post("/validate-schedules", async (req, res) => {
+  try {
+    const { schedules } = req.body;
+
+    if (!schedules || !Array.isArray(schedules)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data jadwal tidak valid",
+      });
+    }
+
+    const validatedData = [];
+    const errors = [];
+
+    for (let i = 0; i < schedules.length; i++) {
+      const schedule = schedules[i];
+      const validatedSchedule = {};
+      let hasError = false;
+
+      // Validasi field required
+      if (!schedule.guru_nama || schedule.guru_nama.toString().trim() === "") {
+        errors.push(`Baris ${i + 1}: Nama guru tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSchedule.guru_nama = schedule.guru_nama;
+      }
+
+      if (
+        !schedule.mata_pelajaran_nama ||
+        schedule.mata_pelajaran_nama.toString().trim() === ""
+      ) {
+        errors.push(`Baris ${i + 1}: Nama mata pelajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSchedule.mata_pelajaran_nama = schedule.mata_pelajaran_nama;
+      }
+
+      if (
+        !schedule.kelas_nama ||
+        schedule.kelas_nama.toString().trim() === ""
+      ) {
+        errors.push(`Baris ${i + 1}: Nama kelas tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSchedule.kelas_nama = schedule.kelas_nama;
+      }
+
+      if (!schedule.hari_nama || schedule.hari_nama.toString().trim() === "") {
+        errors.push(`Baris ${i + 1}: Hari tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSchedule.hari_nama = schedule.hari_nama;
+      }
+
+      if (schedule.jam_ke === null || schedule.jam_ke === undefined) {
+        errors.push(`Baris ${i + 1}: Jam ke tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSchedule.jam_ke = schedule.jam_ke;
+      }
+
+      if (
+        !schedule.semester_nama ||
+        schedule.semester_nama.toString().trim() === ""
+      ) {
+        errors.push(`Baris ${i + 1}: Semester tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSchedule.semester_nama = schedule.semester_nama;
+      }
+
+      if (
+        !schedule.tahun_ajaran ||
+        schedule.tahun_ajaran.toString().trim() === ""
+      ) {
+        errors.push(`Baris ${i + 1}: Tahun ajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedSchedule.tahun_ajaran = schedule.tahun_ajaran;
+      }
+
+      // Field optional
+      validatedSchedule.jam_mulai = schedule.jam_mulai;
+      validatedSchedule.jam_selesai = schedule.jam_selesai;
+
+      if (!hasError) {
+        validatedData.push(validatedSchedule);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Validasi data gagal",
+        errors: errors,
+        validatedData: validatedData,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Validasi data berhasil",
+      validatedData: validatedData,
+    });
+  } catch (error) {
+    console.error("Validation error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal validasi data: ${error.message}`,
+    });
+  }
+});
+
+// Import jadwal mengajar dari Excel
+app.post(
+  "/api/jadwal-mengajar/import",
+  authenticateToken,
+  excelUploadMiddleware,
+  async (req, res) => {
+    let connection;
+    try {
+      console.log("Import jadwal mengajar dari Excel (memory storage)");
+
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("File received in memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        bufferLength: req.file.buffer.length,
+      });
+
+      // Baca file Excel langsung dari buffer
+      const importedSchedules = await readExcelSchedulesFromBuffer(
+        req.file.buffer
+      );
+
+      if (importedSchedules.length === 0) {
+        return res.status(400).json({
+          error:
+            "Tidak ada data jadwal mengajar yang valid ditemukan dalam file",
+        });
+      }
+
+      console.log(`Found ${importedSchedules.length} schedules to import`);
+
+      // Ambil data referensi untuk mapping
+      connection = await getConnection();
+
+      const [teacherList] = await connection.execute(
+        "SELECT id, nama FROM users WHERE role = 'guru'"
+      );
+
+      const [subjectList] = await connection.execute(
+        "SELECT id, nama FROM mata_pelajaran"
+      );
+
+      const [classList] = await connection.execute(
+        "SELECT id, nama FROM kelas"
+      );
+
+      const [dayList] = await connection.execute("SELECT id, nama FROM hari");
+
+      const [semesterList] = await connection.execute(
+        "SELECT id, nama FROM semester"
+      );
+
+      const [periodList] = await connection.execute(
+        "SELECT id, jam_ke FROM jam_pelajaran"
+      );
+
+      await connection.end();
+
+      // Proses import
+      const result = await processScheduleImport(
+        importedSchedules,
+        teacherList,
+        subjectList,
+        classList,
+        dayList,
+        semesterList,
+        periodList
+      );
+
+      console.log("Import completed:", result);
+      res.json({
+        message: "Import selesai",
+        ...result,
+      });
+    } catch (error) {
+      if (connection) {
+        await connection.end();
+      }
+
+      console.error("ERROR IMPORT JADWAL MENGAJAR:", error.message);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Gagal mengimport jadwal mengajar: " + error.message,
+      });
+    }
+  }
+);
+
 // Update Create Jadwal Mengajar dengan validasi bentrokan
 app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
   try {
@@ -2786,7 +6210,6 @@ app.get(
   }
 );
 
-// Get RPP by Guru
 // Get RPP dengan detail lengkap
 app.get("/api/rpp", authenticateToken, async (req, res) => {
   try {
@@ -2829,6 +6252,369 @@ app.get("/api/rpp", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Gagal mengambil data RPP" });
   }
 });
+
+app.post('/api/export-rpp', async (req, res) => {
+  try {
+    const { rppList } = req.body;
+
+    if (!rppList || !Array.isArray(rppList)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data RPP tidak valid'
+      });
+    }
+
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+    
+    // Prepare data for Excel
+    const excelData = [
+      // Header row
+      [
+        'Judul RPP', 'Guru Pengajar', 'Mata Pelajaran', 'Kelas', 'Semester', 
+        'Tahun Ajaran', 'Status', 'Tanggal Dibuat', 'Catatan Admin', 
+        'Kompetensi Dasar', 'Tujuan Pembelajaran', 'Materi Pembelajaran', 
+        'Metode Pembelajaran', 'Media Pembelajaran', 'Sumber Belajar', 
+        'Langkah Pembelajaran', 'Penilaian'
+      ],
+      // Data rows
+      ...rppList.map(rpp => [
+        rpp.judul || '',
+        rpp.guru_nama || '',
+        rpp.mata_pelajaran_nama || '',
+        rpp.kelas_nama || '',
+        rpp.semester || '',
+        rpp.tahun_ajaran || '',
+        getStatusText(rpp.status),
+        formatDateForExport(rpp.created_at),
+        rpp.catatan_admin || '',
+        rpp.kompetensi_dasar || '',
+        rpp.tujuan_pembelajaran || '',
+        rpp.materi_pembelajaran || '',
+        rpp.metode_pembelajaran || '',
+        rpp.media_pembelajaran || '',
+        rpp.sumber_belajar || '',
+        rpp.langkah_pembelajaran || '',
+        rpp.penilaian || ''
+      ])
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+    // Set column widths for better readability
+    if (!worksheet['!cols']) worksheet['!cols'] = [];
+    const columnWidths = [20, 15, 20, 10, 10, 12, 10, 12, 15, 25, 25, 25, 20, 20, 20, 30, 25];
+    for (let i = 0; i < columnWidths.length; i++) {
+      worksheet['!cols'][i] = { width: columnWidths[i] };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data RPP');
+
+    // Generate filename
+    const filename = `Data_RPP_${Date.now()}.xlsx`;
+    const filePath = path.join(__dirname, '../temp', filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
+      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error('Error downloading file:', err);
+        res.status(500).json({
+          success: false,
+          message: 'Gagal mengunduh file'
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+
+  } catch (error) {
+    console.error('Export RPP error:', error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengexport data RPP: ${error.message}`
+    });
+  }
+});
+
+// Download template RPP Excel
+app.get('/api/download-rpp-template', async (req, res) => {
+  try {
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+    
+    // Prepare template data
+    const templateData = [
+      // Header row
+      [
+        'Judul RPP*', 'Mata Pelajaran ID*', 'Kelas ID*', 'Semester*', 
+        'Tahun Ajaran*', 'Kompetensi Dasar*', 'Tujuan Pembelajaran*', 
+        'Materi Pembelajaran*', 'Metode Pembelajaran', 'Media Pembelajaran', 
+        'Sumber Belajar', 'Langkah Pembelajaran*', 'Penilaian*'
+      ],
+      // Example data
+      [
+        'RPP Matematika Kelas 10 - Aljabar',
+        '1',
+        '5',
+        'Ganjil',
+        '2024/2025',
+        'Memahami konsep aljabar dasar',
+        'Siswa dapat menyelesaikan persamaan linear',
+        'Konsep variabel, koefisien, dan konstanta',
+        'Ceramah, diskusi, latihan',
+        'Papan tulis, proyektor',
+        'Buku paket matematika kelas 10',
+        'Pendahuluan, kegiatan inti, penutup',
+        'Tes tertulis, observasi'
+      ],
+      // Second example
+      [
+        'RPP Bahasa Indonesia Kelas 8 - Cerpen',
+        '2',
+        '3',
+        'Genap',
+        '2024/2025',
+        'Menganalisis unsur intrinsik cerpen',
+        'Siswa dapat mengidentifikasi tokoh, latar, dan alur cerita',
+        'Unsur intrinsik cerpen: tokoh, latar, alur, tema',
+        'Diskusi kelompok, presentasi',
+        'Teks cerpen, LCD proyektor',
+        'Buku kumpulan cerpen, LKS',
+        'Pembukaan, eksplorasi, elaborasi, konfirmasi',
+        'Penilaian proses, hasil karya, presentasi'
+      ],
+      // Empty row
+      [],
+      // Notes
+      ['* Wajib diisi'],
+      ['Format Semester: Ganjil / Genap'],
+      ['Format Tahun Ajaran: YYYY/YYYY (contoh: 2024/2025)'],
+      ['Mata Pelajaran ID dan Kelas ID harus sesuai dengan ID di sistem']
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(templateData);
+
+    // Set column widths for template
+    if (!worksheet['!cols']) worksheet['!cols'] = [];
+    const templateWidths = [25, 18, 12, 10, 15, 25, 25, 25, 20, 20, 20, 25, 20];
+    for (let i = 0; i < templateWidths.length; i++) {
+      worksheet['!cols'][i] = { width: templateWidths[i] };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Template RPP');
+
+    // Generate filename
+    const filename = 'Template_RPP.xlsx';
+    const filePath = path.join(__dirname, '../temp', filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
+      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error('Error downloading template:', err);
+        res.status(500).json({
+          success: false,
+          message: 'Gagal mengunduh template'
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+
+  } catch (error) {
+    console.error('RPP template download error:', error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengunduh template RPP: ${error.message}`
+    });
+  }
+});
+
+// Validasi data RPP sebelum import
+app.post('/api/validate-rpp', async (req, res) => {
+  try {
+    const { rppData } = req.body;
+
+    if (!rppData || !Array.isArray(rppData)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data RPP tidak valid'
+      });
+    }
+
+    const validatedData = [];
+    const errors = [];
+
+    for (let i = 0; i < rppData.length; i++) {
+      const rpp = rppData[i];
+      const validatedRpp = {};
+      let hasError = false;
+
+      // Validasi field required
+      if (!rpp.judul || rpp.judul.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Judul RPP tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedRpp.judul = rpp.judul.toString().trim();
+      }
+
+      if (!rpp.mata_pelajaran_id || isNaN(parseInt(rpp.mata_pelajaran_id))) {
+        errors.push(`Baris ${i + 1}: Mata Pelajaran ID tidak valid`);
+        hasError = true;
+      } else {
+        validatedRpp.mata_pelajaran_id = parseInt(rpp.mata_pelajaran_id);
+      }
+
+      if (!rpp.kelas_id || isNaN(parseInt(rpp.kelas_id))) {
+        errors.push(`Baris ${i + 1}: Kelas ID tidak valid`);
+        hasError = true;
+      } else {
+        validatedRpp.kelas_id = parseInt(rpp.kelas_id);
+      }
+
+      if (!rpp.semester || !['Ganjil', 'Genap'].includes(rpp.semester)) {
+        errors.push(`Baris ${i + 1}: Semester harus "Ganjil" atau "Genap"`);
+        hasError = true;
+      } else {
+        validatedRpp.semester = rpp.semester;
+      }
+
+      if (!rpp.tahun_ajaran || !isValidTahunAjaran(rpp.tahun_ajaran)) {
+        errors.push(`Baris ${i + 1}: Format tahun ajaran tidak valid (contoh: 2024/2025)`);
+        hasError = true;
+      } else {
+        validatedRpp.tahun_ajaran = rpp.tahun_ajaran;
+      }
+
+      if (!rpp.kompetensi_dasar || rpp.kompetensi_dasar.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Kompetensi dasar tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedRpp.kompetensi_dasar = rpp.kompetensi_dasar.toString().trim();
+      }
+
+      if (!rpp.tujuan_pembelajaran || rpp.tujuan_pembelajaran.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Tujuan pembelajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedRpp.tujuan_pembelajaran = rpp.tujuan_pembelajaran.toString().trim();
+      }
+
+      if (!rpp.materi_pembelajaran || rpp.materi_pembelajaran.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Materi pembelajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedRpp.materi_pembelajaran = rpp.materi_pembelajaran.toString().trim();
+      }
+
+      if (!rpp.langkah_pembelajaran || rpp.langkah_pembelajaran.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Langkah pembelajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedRpp.langkah_pembelajaran = rpp.langkah_pembelajaran.toString().trim();
+      }
+
+      if (!rpp.penilaian || rpp.penilaian.toString().trim() === '') {
+        errors.push(`Baris ${i + 1}: Penilaian tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedRpp.penilaian = rpp.penilaian.toString().trim();
+      }
+
+      // Field optional
+      validatedRpp.metode_pembelajaran = rpp.metode_pembelajaran || '';
+      validatedRpp.media_pembelajaran = rpp.media_pembelajaran || '';
+      validatedRpp.sumber_belajar = rpp.sumber_belajar || '';
+
+      if (!hasError) {
+        validatedData.push(validatedRpp);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validasi data RPP gagal',
+        errors: errors,
+        validatedData: validatedData
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Validasi data RPP berhasil',
+      validatedData: validatedData
+    });
+
+  } catch (error) {
+    console.error('RPP validation error:', error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal validasi data RPP: ${error.message}`
+    });
+  }
+});
+
+// Helper functions
+function getStatusText(status) {
+  switch (status) {
+    case 'Disetujui':
+      return 'Approved';
+    case 'Menunggu':
+      return 'Pending';
+    case 'Ditolak':
+      return 'Rejected';
+    default:
+      return status || '-';
+  }
+}
+
+function formatDateForExport(date) {
+  if (!date) return '';
+  try {
+    const parsed = new Date(date);
+    return parsed.toISOString().split('T')[0];
+  } catch (e) {
+    return date;
+  }
+}
+
+function isValidTahunAjaran(tahunAjaran) {
+  const pattern = /^\d{4}\/\d{4}$/;
+  if (!pattern.test(tahunAjaran)) return false;
+  
+  const [start, end] = tahunAjaran.split('/');
+  return parseInt(end) - parseInt(start) === 1;
+}
 
 // Create RPP dengan handling undefined values
 app.post("/api/rpp", authenticateToken, async (req, res) => {
@@ -2976,84 +6762,49 @@ app.delete("/api/rpp/:id", authenticateToken, async (req, res) => {
   }
 });
 
-
-// Konfigurasi storage untuk multer
-// const storage = multer.diskStorage({
-//   destination: function (req, file, cb) {
-//     const uploadDir = path.join(__dirname, "uploads/rpp");
-//     require("fs").mkdirSync(uploadDir, { recursive: true });
-//     cb(null, uploadDir);
-//   },
-//   filename: function (req, file, cb) {
-//     // Format: timestamp-namaFile-asli
-//     const timestamp = Date.now();
-//     const originalName = file.originalname;
-//     const fileName = `${timestamp}-${originalName}`;
-//     cb(null, fileName);
-//   },
-// });
-
-// const upload = multer({
-//   storage: storage,
-//   limits: {
-//     fileSize: 10 * 1024 * 1024, // 10MB max file size
-//   },
-//   fileFilter: function (req, file, cb) {
-//     // Hanya izinkan file Word dan PDF
-//     const allowedTypes = [
-//       "application/msword",
-//       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-//       "application/pdf",
-//     ];
-
-//     if (allowedTypes.includes(file.mimetype)) {
-//       cb(null, true);
-//     } else {
-//       cb(
-//         new Error("Hanya file Word (.doc, .docx) dan PDF yang diizinkan"),
-//         false
-//       );
-//     }
-//   },
-// });
-
 // Endpoint untuk upload file
-app.post("/api/upload/rpp", authenticateToken, uploadMiddleware, async (req, res) => {
-  try {
-    console.log("Upload RPP endpoint hit");
-    
-    if (!req.file) {
-      console.log("No file received");
-      return res.status(400).json({ error: "Tidak ada file yang diupload" });
+app.post(
+  "/api/upload/rpp",
+  authenticateToken,
+  uploadMiddleware,
+  async (req, res) => {
+    try {
+      console.log("Upload RPP endpoint hit");
+
+      if (!req.file) {
+        console.log("No file received");
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("File received:", {
+        originalname: req.file.originalname,
+        filename: req.file.filename,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        path: req.file.path,
+      });
+
+      const fileUrl = `/uploads/rpp/${req.file.filename}`;
+
+      console.log("File uploaded successfully:", fileUrl);
+
+      res.json({
+        message: "File berhasil diupload",
+        file_path: fileUrl,
+        file_name: req.file.originalname,
+        file_size: req.file.size,
+      });
+    } catch (error) {
+      console.error("ERROR UPLOAD FILE:", error.message);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Gagal mengupload file",
+        details:
+          process.env.NODE_ENV === "development" ? error.message : undefined,
+      });
     }
-
-    console.log("File received:", {
-      originalname: req.file.originalname,
-      filename: req.file.filename,
-      size: req.file.size,
-      mimetype: req.file.mimetype,
-      path: req.file.path
-    });
-
-    const fileUrl = `/uploads/rpp/${req.file.filename}`;
-
-    console.log("File uploaded successfully:", fileUrl);
-    
-    res.json({
-      message: "File berhasil diupload",
-      file_path: fileUrl,
-      file_name: req.file.originalname,
-      file_size: req.file.size,
-    });
-  } catch (error) {
-    console.error("ERROR UPLOAD FILE:", error.message);
-    console.error("Error stack:", error.stack);
-    res.status(500).json({ 
-      error: "Gagal mengupload file",
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
   }
-});
+);
 
 // Get kegiatan by guru
 app.get("/api/kegiatan/guru/:guruId", authenticateToken, async (req, res) => {
@@ -3142,6 +6893,336 @@ app.get("/api/kegiatan/kelas/:kelasId", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("ERROR GET KEGIATAN KELAS:", error.message);
     res.status(500).json({ error: "Gagal mengambil data kegiatan" });
+  }
+});
+
+// Get semua pengumuman
+app.get("/api/pengumuman", authenticateToken, async (req, res) => {
+  try {
+    console.log("Mengambil data pengumuman");
+    const connection = await getConnection();
+
+    const [pengumuman] = await connection.execute(`
+      SELECT 
+        p.*,
+        u.nama as pembuat_nama,
+        k.nama as kelas_nama,
+        u.role as pembuat_role
+      FROM pengumuman p
+      JOIN users u ON p.pembuat_id = u.id
+      LEFT JOIN kelas k ON p.kelas_id = k.id
+      ORDER BY 
+        CASE WHEN p.prioritas = 'penting' THEN 1 ELSE 2 END,
+        p.created_at DESC
+    `);
+
+    await connection.end();
+    console.log(
+      "Berhasil mengambil data pengumuman, jumlah:",
+      pengumuman.length
+    );
+    res.json(pengumuman);
+  } catch (error) {
+    console.error("ERROR GET PENGUMUMAN:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data pengumuman" });
+  }
+});
+
+// Get pengumuman by ID
+app.get("/api/pengumuman/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Mengambil data pengumuman by ID:", id);
+
+    const connection = await getConnection();
+    const [pengumuman] = await connection.execute(
+      `SELECT 
+        p.*,
+        u.nama as pembuat_nama,
+        k.nama as kelas_nama,
+        u.role as pembuat_role
+      FROM pengumuman p
+      JOIN users u ON p.pembuat_id = u.id
+      LEFT JOIN kelas k ON p.kelas_id = k.id
+      WHERE p.id = ?`,
+      [id]
+    );
+    await connection.end();
+
+    if (pengumuman.length === 0) {
+      return res.status(404).json({ error: "Pengumuman tidak ditemukan" });
+    }
+
+    console.log("Berhasil mengambil data pengumuman:", id);
+    res.json(pengumuman[0]);
+  } catch (error) {
+    console.error("ERROR GET PENGUMUMAN BY ID:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data pengumuman" });
+  }
+});
+
+// Create pengumuman baru
+app.post("/api/pengumuman", authenticateToken, async (req, res) => {
+  try {
+    console.log("Menambah pengumuman baru:", req.body);
+    const {
+      judul,
+      konten,
+      kelas_id,
+      role_target,
+      prioritas,
+      tanggal_awal,
+      tanggal_akhir,
+    } = req.body;
+
+    // Validasi data required
+    if (!judul || !konten) {
+      return res.status(400).json({
+        error: "Judul dan konten harus diisi",
+      });
+    }
+
+    const id = crypto.randomUUID();
+    const pembuat_id = req.user.id; // ID user yang login
+
+    const connection = await getConnection();
+
+    await connection.execute(
+      `INSERT INTO pengumuman 
+        (id, judul, konten, kelas_id, role_target, pembuat_id, prioritas, tanggal_awal, tanggal_akhir) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        judul,
+        konten,
+        kelas_id || null,
+        role_target || "all",
+        pembuat_id,
+        prioritas || "biasa",
+        tanggal_awal || null,
+        tanggal_akhir || null,
+      ]
+    );
+
+    await connection.end();
+
+    console.log("Pengumuman berhasil ditambahkan:", id);
+    res.json({
+      message: "Pengumuman berhasil ditambahkan",
+      id,
+    });
+  } catch (error) {
+    console.error("ERROR POST PENGUMUMAN:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal menambah pengumuman" });
+  }
+});
+
+// Update pengumuman
+app.put("/api/pengumuman/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Update pengumuman:", id, req.body);
+
+    const {
+      judul,
+      konten,
+      kelas_id,
+      role_target,
+      prioritas,
+      tanggal_awal,
+      tanggal_akhir,
+    } = req.body;
+
+    // Validasi data required
+    if (!judul || !konten) {
+      return res.status(400).json({
+        error: "Judul dan konten harus diisi",
+      });
+    }
+
+    const connection = await getConnection();
+
+    await connection.execute(
+      `UPDATE pengumuman 
+       SET judul = ?, konten = ?, kelas_id = ?, role_target = ?, 
+           prioritas = ?, tanggal_awal = ?, tanggal_akhir = ?, updated_at = NOW()
+       WHERE id = ?`,
+      [
+        judul,
+        konten,
+        kelas_id || null,
+        role_target || "all",
+        prioritas || "biasa",
+        tanggal_awal || null,
+        tanggal_akhir || null,
+        id,
+      ]
+    );
+
+    await connection.end();
+
+    console.log("Pengumuman berhasil diupdate:", id);
+    res.json({ message: "Pengumuman berhasil diupdate" });
+  } catch (error) {
+    console.error("ERROR PUT PENGUMUMAN:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal mengupdate pengumuman" });
+  }
+});
+
+// Delete pengumuman
+app.delete("/api/pengumuman/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Delete pengumuman:", id);
+
+    const connection = await getConnection();
+    await connection.execute("DELETE FROM pengumuman WHERE id = ?", [id]);
+    await connection.end();
+
+    console.log("Pengumuman berhasil dihapus:", id);
+    res.json({ message: "Pengumuman berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR DELETE PENGUMUMAN:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal menghapus pengumuman" });
+  }
+});
+
+// Get pengumuman untuk user berdasarkan role dan kelas
+app.get("/api/pengumuman/user/current", authenticateToken, async (req, res) => {
+  try {
+    const user = req.user;
+    console.log(
+      "Mengambil pengumuman untuk user:",
+      user.id,
+      "role:",
+      user.role
+    );
+
+    const connection = await getConnection();
+
+    let query = `
+      SELECT 
+        p.*,
+        u.nama as pembuat_nama,
+        k.nama as kelas_nama,
+        u.role as pembuat_role
+      FROM pengumuman p
+      JOIN users u ON p.pembuat_id = u.id
+      LEFT JOIN kelas k ON p.kelas_id = k.id
+      WHERE 1=1
+        AND (p.tanggal_awal IS NULL OR p.tanggal_awal <= CURDATE())
+        AND (p.tanggal_akhir IS NULL OR p.tanggal_akhir >= CURDATE())
+    `;
+
+    let params = [];
+
+    // Filter berdasarkan role user
+    if (user.role === "siswa") {
+      // Untuk siswa: ambil pengumuman untuk role 'all', 'siswa', atau kelas siswa
+      const [siswaData] = await connection.execute(
+        "SELECT kelas_id FROM siswa WHERE id = ?",
+        [user.id]
+      );
+
+      if (siswaData.length > 0) {
+        const kelasId = siswaData[0].kelas_id;
+        query += ` AND (
+          p.role_target IN ('all', 'siswa') 
+          OR (p.kelas_id = ?)
+        )`;
+        params.push(kelasId);
+      } else {
+        query += ` AND p.role_target IN ('all', 'siswa')`;
+      }
+    } else if (user.role === "guru") {
+      // Untuk guru: ambil pengumuman untuk role 'all', 'guru', atau kelas yang diampu
+      query += ` AND (
+        p.role_target IN ('all', 'guru') 
+        OR (p.kelas_id IN (SELECT kelas_id FROM jadwal_mengajar WHERE guru_id = ?))
+      )`;
+      params.push(user.id);
+    } else if (user.role === "wali") {
+      // Untuk wali: ambil pengumuman untuk role 'all', 'wali', atau kelas anaknya
+      const [siswaData] = await connection.execute(
+        "SELECT kelas_id FROM siswa WHERE id IN (SELECT siswa_id FROM users WHERE id = ?)",
+        [user.id]
+      );
+
+      if (siswaData.length > 0) {
+        const kelasId = siswaData[0].kelas_id;
+        query += ` AND (
+          p.role_target IN ('all', 'wali') 
+          OR (p.kelas_id = ?)
+        )`;
+        params.push(kelasId);
+      } else {
+        query += ` AND p.role_target IN ('all', 'wali')`;
+      }
+    } else if (user.role === "admin") {
+      // Admin bisa melihat semua pengumuman
+      // Tidak perlu filter tambahan
+    } else {
+      // Untuk role lainnya, hanya ambil pengumuman umum
+      query += ` AND p.role_target = 'all'`;
+    }
+
+    query +=
+      " ORDER BY CASE WHEN p.prioritas = 'penting' THEN 1 ELSE 2 END, p.created_at DESC";
+
+    console.log("Query pengumuman:", query);
+    console.log("Parameters:", params);
+
+    const [pengumuman] = await connection.execute(query, params);
+    await connection.end();
+
+    console.log("Pengumuman untuk user ditemukan:", pengumuman.length);
+    res.json(pengumuman);
+  } catch (error) {
+    console.error("ERROR GET PENGUMUMAN USER CURRENT:", error.message);
+    console.error("Error stack:", error.stack);
+    res
+      .status(500)
+      .json({ error: "Gagal mengambil data pengumuman: " + error.message });
+  }
+});
+
+// Backup endpoint untuk pengumuman
+app.get("/api/pengumuman/fallback", authenticateToken, async (req, res) => {
+  try {
+    const user = req.user;
+    console.log("Mengambil pengumuman fallback untuk:", user.role);
+
+    const connection = await getConnection();
+
+    // Query sederhana sebagai fallback
+    let query = `
+      SELECT 
+        p.*,
+        u.nama as pembuat_nama,
+        k.nama as kelas_nama
+      FROM pengumuman p
+      JOIN users u ON p.pembuat_id = u.id
+      LEFT JOIN kelas k ON p.kelas_id = k.id
+      WHERE p.role_target IN ('all', ?)
+        AND (p.tanggal_awal IS NULL OR p.tanggal_awal <= CURDATE())
+        AND (p.tanggal_akhir IS NULL OR p.tanggal_akhir >= CURDATE())
+      ORDER BY 
+        CASE WHEN p.prioritas = 'penting' THEN 1 ELSE 2 END,
+        p.created_at DESC
+      LIMIT 50
+    `;
+
+    const [pengumuman] = await connection.execute(query, [user.role]);
+    await connection.end();
+
+    console.log("Pengumuman fallback ditemukan:", pengumuman.length);
+    res.json(pengumuman);
+  } catch (error) {
+    console.error("ERROR GET PENGUMUMAN FALLBACK:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data pengumuman fallback" });
   }
 });
 
