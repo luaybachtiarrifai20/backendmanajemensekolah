@@ -58,6 +58,124 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+const authenticateTokenAndSchool = async (req, res, next) => {
+  try {
+    const authHeader = req.headers["authorization"];
+    const token = authHeader && authHeader.split(" ")[1];
+
+    if (!token) {
+      return res.status(401).json({ error: "Token tidak tersedia" });
+    }
+
+    // Verify token
+    const user = await new Promise((resolve, reject) => {
+      jwt.verify(token, JWT_SECRET, (err, decoded) => {
+        if (err) reject(err);
+        else resolve(decoded);
+      });
+    });
+
+    // Cek status sekolah user melalui user_schools
+    const connection = await getConnection();
+
+    const [userSchools] = await connection.execute(
+      `SELECT 
+        u.*,
+        us.sekolah_id,
+        us.is_active as users_school_active,
+        s.nama_sekolah, 
+        s.status as sekolah_status,
+        s.alamat as sekolah_alamat,
+        s.telepon as sekolah_telepon,
+        s.email as sekolah_email
+       FROM users u 
+       JOIN users_schools us ON u.id = us.user_id
+       JOIN sekolah s ON us.sekolah_id = s.id 
+       WHERE u.id = ? AND us.is_active = TRUE`,
+      [user.id]
+    );
+
+    await connection.end();
+
+    if (userSchools.length === 0) {
+      return res.status(403).json({
+        error:
+          "Akun tidak terdaftar di sekolah manapun atau akses dinonaktifkan",
+      });
+    }
+
+    // Jika user punya multiple sekolah aktif, gunakan sekolah_id dari token atau ambil pertama
+    let selectedSchool = userSchools[0];
+
+    // Jika token punya sekolah_id, cari yang sesuai
+    if (user.sekolah_id) {
+      const schoolFromToken = userSchools.find(
+        (us) => us.sekolah_id === user.sekolah_id
+      );
+      if (schoolFromToken) {
+        selectedSchool = schoolFromToken;
+      }
+    }
+
+    if (selectedSchool.sekolah_status !== "aktif") {
+      return res.status(403).json({
+        error: "Sekolah tidak aktif. Silakan hubungi administrator.",
+      });
+    }
+
+    if (!selectedSchool.users_school_active) {
+      return res.status(403).json({
+        error: "Akses ke sekolah ini dinonaktifkan.",
+      });
+    }
+
+    // Tambahkan data lengkap ke request
+    req.user = {
+      id: selectedSchool.id,
+      email: selectedSchool.email,
+      role: selectedSchool.role,
+      nama: selectedSchool.nama,
+      // Data sekolah
+      sekolah_id: selectedSchool.sekolah_id,
+      nama_sekolah: selectedSchool.nama_sekolah,
+      sekolah_status: selectedSchool.sekolah_status,
+      sekolah_alamat: selectedSchool.sekolah_alamat,
+      sekolah_telepon: selectedSchool.sekolah_telepon,
+      sekolah_email: selectedSchool.sekolah_email,
+      // Data user_schools
+      users_school_active: selectedSchool.users_school_active,
+      // Data tambahan user
+      kelas_id: selectedSchool.kelas_id,
+      nip: selectedSchool.nip,
+      is_wali_kelas: selectedSchool.is_wali_kelas,
+      siswa_id: selectedSchool.siswa_id,
+      created_at: selectedSchool.created_at,
+      // Daftar sekolah yang bisa diakses
+      accessible_schools: userSchools.map((us) => ({
+        sekolah_id: us.sekolah_id,
+        nama_sekolah: us.nama_sekolah,
+        status: us.sekolah_status,
+        users_school_active: us.users_school_active,
+      })),
+    };
+
+    req.sekolah_id = selectedSchool.sekolah_id;
+    next();
+  } catch (error) {
+    console.error("ERROR AUTHENTICATE TOKEN AND SCHOOL:", error.message);
+
+    if (error.name === "JsonWebTokenError") {
+      return res.status(403).json({ error: "Token tidak valid" });
+    }
+
+    if (error.name === "TokenExpiredError") {
+      return res.status(403).json({ error: "Token telah kadaluarsa" });
+    }
+
+    return res.status(500).json({ error: "Gagal memverifikasi token" });
+  }
+};
+
 // Konfigurasi storage untuk multer - PERBAIKI INI
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -200,63 +318,6 @@ const excelUploadMiddleware = (req, res, next) => {
   });
 };
 
-// Di bagian endpoint siswa, tambahkan fungsi untuk membuat user wali
-async function createWaliUser(email, namaWali, siswaId) {
-  try {
-    console.log("Membuat user wali untuk siswa:", siswaId);
-
-    const connection = await getConnection();
-
-    // Cek apakah email sudah terdaftar
-    const [existingUsers] = await connection.execute(
-      "SELECT id FROM users WHERE email = ?",
-      [email]
-    );
-
-    if (existingUsers.length > 0) {
-      await connection.end();
-      console.log("Email sudah terdaftar:", email);
-      return { success: false, error: "Email sudah terdaftar" };
-    }
-
-    const id = crypto.randomUUID();
-    const password = "password123";
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    await connection.execute(
-      'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
-      [id, namaWali, email, hashedPassword, siswaId]
-    );
-
-    await connection.end();
-
-    console.log("User wali berhasil dibuat:", id);
-    return { success: true, id };
-  } catch (error) {
-    console.error("ERROR CREATE WALI USER:", error.message);
-    return { success: false, error: error.message };
-  }
-}
-
-async function deleteWaliUser(siswaId) {
-  try {
-    console.log("Menghapus user wali untuk siswa:", siswaId);
-
-    const connection = await getConnection();
-    await connection.execute(
-      "DELETE FROM users WHERE siswa_id = ? AND role = 'wali'",
-      [siswaId]
-    );
-    await connection.end();
-
-    console.log("User wali berhasil dihapus");
-    return { success: true };
-  } catch (error) {
-    console.error("ERROR DELETE WALI USER:", error.message);
-    return { success: false, error: error.message };
-  }
-}
-
 // Middleware untuk logging request
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
@@ -265,11 +326,11 @@ app.use((req, res, next) => {
 
 // Routes
 
-// Login
+// Login untuk multi-sekolah dengan user_schools
 app.post("/api/login", async (req, res) => {
   try {
     console.log("Login attempt:", req.body.email);
-    const { email, password } = req.body;
+    const { email, password, sekolah_id } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: "Email dan password diperlukan" });
@@ -277,14 +338,14 @@ app.post("/api/login", async (req, res) => {
 
     const connection = await getConnection();
 
+    // Cari user berdasarkan email
     const [users] = await connection.execute(
       "SELECT * FROM users WHERE email = ?",
       [email]
     );
 
-    await connection.end();
-
     if (users.length === 0) {
+      await connection.end();
       console.log("Login gagal: Email tidak ditemukan");
       return res.status(401).json({ error: "Email atau password salah" });
     }
@@ -293,17 +354,106 @@ app.post("/api/login", async (req, res) => {
     const isValidPassword = await bcrypt.compare(password, user.password);
 
     if (!isValidPassword) {
+      await connection.end();
       console.log("Login gagal: Password salah");
       return res.status(401).json({ error: "Email atau password salah" });
     }
 
+    // Cek sekolah yang bisa diakses user melalui user_schools
+    const [userSchools] = await connection.execute(
+      `SELECT 
+        us.*,
+        s.nama_sekolah,
+        s.status as sekolah_status,
+        s.alamat as sekolah_alamat,
+        s.telepon as sekolah_telepon,
+        s.email as sekolah_email
+       FROM users_schools us
+       JOIN sekolah s ON us.sekolah_id = s.id
+       WHERE us.user_id = ? AND us.is_active = TRUE`,
+      [user.id]
+    );
+
+    if (userSchools.length === 0) {
+      await connection.end();
+      return res.status(403).json({
+        error: "Akun tidak memiliki akses ke sekolah manapun",
+      });
+    }
+
+    // Filter hanya sekolah yang aktif
+    const activeSchools = userSchools.filter(
+      (us) => us.sekolah_status === "aktif"
+    );
+
+    if (activeSchools.length === 0) {
+      await connection.end();
+      return res.status(403).json({
+        error: "Tidak ada sekolah aktif yang dapat diakses",
+      });
+    }
+
+    let selectedSchool = activeSchools[0];
+
+    // Jika sekolah_id diberikan, cari yang sesuai
+    if (sekolah_id) {
+      const requestedSchool = activeSchools.find(
+        (us) => us.sekolah_id === sekolah_id
+      );
+      if (!requestedSchool) {
+        await connection.end();
+        return res.status(403).json({
+          error: "Tidak memiliki akses ke sekolah yang diminta",
+        });
+      }
+      selectedSchool = requestedSchool;
+    }
+
+    // Jika user punya multiple sekolah dan tidak memilih, kembalikan daftar
+    if (activeSchools.length > 1 && !sekolah_id) {
+      await connection.end();
+
+      const sekolahList = activeSchools.map((us) => ({
+        sekolah_id: us.sekolah_id,
+        nama_sekolah: us.nama_sekolah,
+        alamat: us.sekolah_alamat,
+        telepon: us.sekolah_telepon,
+      }));
+
+      return res.status(200).json({
+        message: "Pilih sekolah untuk login",
+        pilih_sekolah: true,
+        sekolah_list: sekolahList,
+        user: {
+          id: user.id,
+          nama: user.nama,
+          email: user.email,
+          role: user.role,
+        },
+      });
+    }
+
+    // Generate token dengan sekolah_id
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        sekolah_id: selectedSchool.sekolah_id,
+        nama: user.nama,
+      },
       JWT_SECRET,
       { expiresIn: "24h" }
     );
 
-    console.log("Login berhasil untuk user:", user.email);
+    await connection.end();
+
+    console.log(
+      "Login berhasil:",
+      user.email,
+      "sekolah:",
+      selectedSchool.nama_sekolah
+    );
     res.json({
       token,
       user: {
@@ -312,6 +462,12 @@ app.post("/api/login", async (req, res) => {
         email: user.email,
         role: user.role,
         kelas_id: user.kelas_id,
+        sekolah_id: selectedSchool.sekolah_id,
+        nama_sekolah: selectedSchool.nama_sekolah,
+        sekolah_alamat: selectedSchool.sekolah_alamat,
+        sekolah_telepon: selectedSchool.sekolah_telepon,
+        sekolah_email: selectedSchool.sekolah_email,
+        accessible_schools_count: activeSchools.length,
       },
     });
   } catch (error) {
@@ -320,10 +476,201 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// Get semua sekolah yang bisa diakses user
+app.get("/api/user/schools", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const connection = await getConnection();
+
+    const [userSchools] = await connection.execute(
+      `SELECT 
+        us.*,
+        s.nama_sekolah,
+        s.status as sekolah_status,
+        s.alamat,
+        s.telepon,
+        s.email
+       FROM users_schools us
+       JOIN sekolah s ON us.sekolah_id = s.id
+       WHERE us.user_id = ?
+       ORDER BY us.is_active DESC, s.nama_sekolah`,
+      [req.user.id]
+    );
+
+    await connection.end();
+
+    res.json(userSchools);
+  } catch (error) {
+    console.error("ERROR GET USER SCHOOLS:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data sekolah user" });
+  }
+});
+
+// Pindah sekolah (untuk user dengan multiple akses)
+app.post("/api/switch-school", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { sekolah_id } = req.body;
+
+    if (!sekolah_id) {
+      return res.status(400).json({ error: "Sekolah ID diperlukan" });
+    }
+
+    const connection = await getConnection();
+
+    // Cek apakah user punya akses ke sekolah yang diminta
+    const [userSchools] = await connection.execute(
+      `SELECT us.*, s.status as sekolah_status 
+       FROM users_schools us
+       JOIN sekolah s ON us.sekolah_id = s.id 
+       WHERE us.user_id = ? AND us.sekolah_id = ? AND us.is_active = TRUE`,
+      [req.user.id, sekolah_id]
+    );
+
+    if (userSchools.length === 0) {
+      await connection.end();
+      return res.status(403).json({
+        error: "Tidak memiliki akses ke sekolah ini",
+      });
+    }
+
+    const userSchool = userSchools[0];
+
+    if (userSchool.sekolah_status !== "aktif") {
+      await connection.end();
+      return res.status(403).json({ error: "Sekolah tidak aktif" });
+    }
+
+    // Get user data
+    const [users] = await connection.execute(
+      "SELECT * FROM users WHERE id = ?",
+      [req.user.id]
+    );
+
+    await connection.end();
+
+    const user = users[0];
+
+    // Generate token baru untuk sekolah yang dipilih
+    const newToken = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        sekolah_id: sekolah_id,
+        nama: user.nama,
+      },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    res.json({
+      message: "Berhasil pindah sekolah",
+      token: newToken,
+      sekolah_id: sekolah_id,
+    });
+  } catch (error) {
+    console.error("ERROR SWITCH SCHOOL:", error.message);
+    res.status(500).json({ error: "Gagal pindah sekolah" });
+  }
+});
+
+// Endpoint untuk mengelola sekolah (hanya untuk super admin)
+app.get("/api/sekolah", authenticateToken, async (req, res) => {
+  try {
+    // Cek apakah user adalah super admin
+    if (req.user.role !== "super_admin") {
+      return res.status(403).json({ error: "Akses ditolak" });
+    }
+
+    console.log("Mengambil data semua sekolah");
+    const connection = await getConnection();
+    const [sekolah] = await connection.execute("SELECT * FROM sekolah");
+    await connection.end();
+
+    res.json(sekolah);
+  } catch (error) {
+    console.error("ERROR GET SEKOLAH:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data sekolah" });
+  }
+});
+
+app.post("/api/sekolah", authenticateToken, async (req, res) => {
+  try {
+    // Cek apakah user adalah super admin
+    if (req.user.role !== "super_admin") {
+      return res.status(403).json({ error: "Akses ditolak" });
+    }
+
+    console.log("Menambah sekolah baru:", req.body);
+    const { nama_sekolah, alamat, telepon, email, status } = req.body;
+    const id = crypto.randomUUID();
+
+    const connection = await getConnection();
+    await connection.execute(
+      "INSERT INTO sekolah (id, nama_sekolah, alamat, telepon, email, status) VALUES (?, ?, ?, ?, ?, ?)",
+      [id, nama_sekolah, alamat, telepon, email, status || "aktif"]
+    );
+
+    // Buat user admin otomatis
+    const adminId = crypto.randomUUID();
+    const password = "password123";
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const adminEmail = `admin.${id}@sekolah.sch.id`;
+
+    await connection.execute(
+      'INSERT INTO users (id, nama, email, password, role, sekolah_id) VALUES (?, ?, ?, ?, "admin", ?)',
+      [adminId, `Admin ${nama_sekolah}`, adminEmail, hashedPassword, id]
+    );
+
+    await connection.end();
+
+    console.log("Sekolah berhasil ditambahkan:", id);
+    res.json({
+      message: "Sekolah berhasil ditambahkan",
+      id,
+      admin_account: {
+        email: adminEmail,
+        password: "password123",
+      },
+    });
+  } catch (error) {
+    console.error("ERROR POST SEKOLAH:", error.message);
+    res.status(500).json({ error: "Gagal menambah sekolah" });
+  }
+});
+
+app.put("/api/sekolah/:id/status", authenticateToken, async (req, res) => {
+  try {
+    // Cek apakah user adalah super admin
+    if (req.user.role !== "super_admin") {
+      return res.status(403).json({ error: "Akses ditolak" });
+    }
+
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!["aktif", "tidak_aktif"].includes(status)) {
+      return res.status(400).json({ error: "Status tidak valid" });
+    }
+
+    const connection = await getConnection();
+    await connection.execute(
+      "UPDATE sekolah SET status = ?, updated_at = NOW() WHERE id = ?",
+      [status, id]
+    );
+    await connection.end();
+
+    console.log("Status sekolah berhasil diupdate:", id);
+    res.json({ message: "Status sekolah berhasil diupdate" });
+  } catch (error) {
+    console.error("ERROR UPDATE STATUS SEKOLAH:", error.message);
+    res.status(500).json({ error: "Gagal mengupdate status sekolah" });
+  }
+});
+
 // Endpoint untuk mendapatkan grade levels dari school_configs
 app.get(
   "/api/school-configs/grade-levels",
-  authenticateToken,
+  authenticateTokenAndSchool,
   async (req, res) => {
     try {
       console.log("Mengambil data grade levels dari school_configs");
@@ -360,18 +707,24 @@ app.get(
   }
 );
 // Kelola Kelas
-app.get("/api/kelas", authenticateToken, async (req, res) => {
+app.get("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data kelas");
+    console.log("Mengambil data kelas untuk sekolah:", req.sekolah_id);
     const connection = await getConnection();
-    const [kelas] = await connection.execute(`
+
+    const [kelas] = await connection.execute(
+      `
       SELECT 
         k.*, 
         u.nama as wali_kelas_nama,
         (SELECT COUNT(*) FROM siswa s WHERE s.kelas_id = k.id) as jumlah_siswa
       FROM kelas k 
       LEFT JOIN users u ON k.wali_kelas_id = u.id
-    `);
+      WHERE k.sekolah_id = ?  -- FILTER BERDASARKAN SEKOLAH
+    `,
+      [req.sekolah_id]
+    ); // Gunakan sekolah_id dari autentikasi
+
     await connection.end();
     console.log("Berhasil mengambil data kelas, jumlah:", kelas.length);
     res.json(kelas);
@@ -658,7 +1011,7 @@ app.post("/api/validate-classes", async (req, res) => {
 });
 
 // Di index.js - Update endpoint POST kelas
-app.post("/api/kelas", authenticateToken, async (req, res) => {
+app.post("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah kelas baru:", req.body);
     const { nama, wali_kelas_id, grade_level } = req.body; // Tambahkan grade_level
@@ -666,8 +1019,8 @@ app.post("/api/kelas", authenticateToken, async (req, res) => {
 
     const connection = await getConnection();
     await connection.execute(
-      "INSERT INTO kelas (id, nama, wali_kelas_id, grade_level) VALUES (?, ?, ?, ?)", // Tambahkan grade_level
-      [id, nama, wali_kelas_id, grade_level]
+      "INSERT INTO kelas (id, nama, wali_kelas_id, grade_level, sekolah_id) VALUES (?, ?, ?, ?, ?)", // Tambahkan grade_level
+      [id, nama, wali_kelas_id, grade_level, req.sekolah_id]
     );
     await connection.end();
 
@@ -680,17 +1033,30 @@ app.post("/api/kelas", authenticateToken, async (req, res) => {
   }
 });
 
-// Update endpoint PUT kelas
-app.put("/api/kelas/:id", authenticateToken, async (req, res) => {
+app.put("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Update kelas:", id, req.body);
-    const { nama, wali_kelas_id, grade_level } = req.body; // Tambahkan grade_level
+    const { nama, wali_kelas_id, grade_level } = req.body;
 
     const connection = await getConnection();
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [existingClass] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingClass.length === 0) {
+      await connection.end();
+      return res
+        .status(404)
+        .json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
+
     await connection.execute(
-      "UPDATE kelas SET nama = ?, wali_kelas_id = ?, grade_level = ? WHERE id = ?", // Tambahkan grade_level
-      [nama, wali_kelas_id, grade_level, id]
+      "UPDATE kelas SET nama = ?, wali_kelas_id = ?, grade_level = ? WHERE id = ? AND sekolah_id = ?",
+      [nama, wali_kelas_id, grade_level, id, req.sekolah_id] // Tambahkan sekolah_id di WHERE
     );
     await connection.end();
 
@@ -704,12 +1070,25 @@ app.put("/api/kelas/:id", authenticateToken, async (req, res) => {
 });
 
 // Delete Kelas
-app.delete("/api/kelas/:id", authenticateToken, async (req, res) => {
+app.delete("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Delete kelas:", id);
 
     const connection = await getConnection();
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [existingClass] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingClass.length === 0) {
+      await connection.end();
+      return res
+        .status(404)
+        .json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Cek jika kelas memiliki siswa
     const [siswa] = await connection.execute(
@@ -724,7 +1103,10 @@ app.delete("/api/kelas/:id", authenticateToken, async (req, res) => {
       });
     }
 
-    await connection.execute("DELETE FROM kelas WHERE id = ?", [id]);
+    await connection.execute(
+      "DELETE FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id] // Tambahkan sekolah_id di WHERE
+    );
     await connection.end();
 
     console.log("Kelas berhasil dihapus:", id);
@@ -737,15 +1119,18 @@ app.delete("/api/kelas/:id", authenticateToken, async (req, res) => {
 });
 
 // Get Kelas by ID
-app.get("/api/kelas/:id", authenticateToken, async (req, res) => {
+app.get("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Mengambil data kelas by ID:", id);
 
     const connection = await getConnection();
     const [kelas] = await connection.execute(
-      "SELECT k.*, u.nama as wali_kelas_nama FROM kelas k LEFT JOIN users u ON k.wali_kelas_id = u.id WHERE k.id = ?",
-      [id]
+      `SELECT k.*, u.nama as wali_kelas_nama 
+       FROM kelas k 
+       LEFT JOIN users u ON k.wali_kelas_id = u.id 
+       WHERE k.id = ? AND k.sekolah_id = ?`, // Tambahkan sekolah_id di WHERE
+      [id, req.sekolah_id]
     );
     await connection.end();
 
@@ -762,9 +1147,9 @@ app.get("/api/kelas/:id", authenticateToken, async (req, res) => {
 });
 
 // Kelola Guru
-app.get("/api/guru", authenticateToken, async (req, res) => {
+app.get("/api/guru", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data guru");
+    console.log("Mengambil data guru untuk sekolah:", req.sekolah_id);
     const connection = await getConnection();
     const [guru] = await connection.execute(`
       SELECT 
@@ -773,8 +1158,8 @@ app.get("/api/guru", authenticateToken, async (req, res) => {
         (SELECT COUNT(*) FROM kelas WHERE wali_kelas_id = u.id) as is_wali_kelas
       FROM users u 
       LEFT JOIN kelas k ON u.kelas_id = k.id 
-      WHERE u.role = 'guru'
-    `);
+      WHERE u.role = 'guru' AND u.sekolah_id = ?
+    `, [req.sekolah_id]); // Tambahkan filter sekolah_id
     await connection.end();
     console.log("Berhasil mengambil data guru, jumlah:", guru.length);
     res.json(guru);
@@ -785,12 +1170,23 @@ app.get("/api/guru", authenticateToken, async (req, res) => {
 });
 
 // Delete Guru
-app.delete("/api/guru/:id", authenticateToken, async (req, res) => {
+app.delete("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Delete guru:", id);
 
     const connection = await getConnection();
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [existingGuru] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingGuru.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Cek jika guru adalah wali kelas
     const [waliKelas] = await connection.execute(
@@ -806,8 +1202,8 @@ app.delete("/api/guru/:id", authenticateToken, async (req, res) => {
     }
 
     await connection.execute(
-      "DELETE FROM users WHERE id = ? AND role = 'guru'",
-      [id]
+      "DELETE FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [id, req.sekolah_id] // Tambahkan sekolah_id di WHERE
     );
     await connection.end();
 
@@ -821,15 +1217,16 @@ app.delete("/api/guru/:id", authenticateToken, async (req, res) => {
 });
 
 // Kelola Siswa
-app.get("/api/siswa", authenticateToken, async (req, res) => {
+app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data siswa");
+    console.log("Mengambil data siswa untuk sekolah:", req.sekolah_id);
     const connection = await getConnection();
     const [siswa] = await connection.execute(`
       SELECT s.*, k.nama as kelas_nama 
       FROM siswa s 
       LEFT JOIN kelas k ON s.kelas_id = k.id
-    `);
+      WHERE s.sekolah_id = ?  -- Tambahkan filter sekolah_id
+    `, [req.sekolah_id]);
     await connection.end();
     console.log("Berhasil mengambil data siswa, jumlah:", siswa.length);
     res.json(siswa);
@@ -839,33 +1236,53 @@ app.get("/api/siswa", authenticateToken, async (req, res) => {
   }
 });
 // Get Siswa by Kelas ID
-app.get("/api/siswa/kelas/:kelasId", authenticateToken, async (req, res) => {
-  try {
-    const { kelasId } = req.params;
-    console.log("Mengambil data siswa by kelas ID:", kelasId);
+app.get(
+  "/api/siswa/kelas/:kelasId",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const { kelasId } = req.params;
+      console.log("Mengambil data siswa by kelas ID:", kelasId);
 
-    const connection = await getConnection();
-    const [siswa] = await connection.execute(
-      "SELECT s.*, k.nama as kelas_nama FROM siswa s LEFT JOIN kelas k ON s.kelas_id = k.id WHERE s.kelas_id = ? ORDER BY s.nama",
-      [kelasId]
-    );
-    await connection.end();
+      const connection = await getConnection();
+      
+      // Cek apakah kelas termasuk dalam sekolah yang sama
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelasId, req.sekolah_id]
+      );
 
-    console.log(
-      "Berhasil mengambil data siswa untuk kelas:",
-      kelasId,
-      "jumlah:",
-      siswa.length
-    );
-    res.json(siswa);
-  } catch (error) {
-    console.error("ERROR GET SISWA BY KELAS:", error.message);
-    res.status(500).json({ error: "Gagal mengambil data siswa" });
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+
+      const [siswa] = await connection.execute(
+        `SELECT s.*, k.nama as kelas_nama 
+         FROM siswa s 
+         LEFT JOIN kelas k ON s.kelas_id = k.id 
+         WHERE s.kelas_id = ? AND s.sekolah_id = ? 
+         ORDER BY s.nama`,
+        [kelasId, req.sekolah_id]  // Tambahkan sekolah_id
+      );
+      await connection.end();
+
+      console.log(
+        "Berhasil mengambil data siswa untuk kelas:",
+        kelasId,
+        "jumlah:",
+        siswa.length
+      );
+      res.json(siswa);
+    } catch (error) {
+      console.error("ERROR GET SISWA BY KELAS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil data siswa" });
+    }
   }
-});
+);
 
 // Endpoint untuk download template kelas
-app.get("/api/kelas/template", authenticateToken, async (req, res) => {
+app.get("/api/kelas/template", authenticateTokenAndSchool, async (req, res) => {
   try {
     const XLSX = require("xlsx");
 
@@ -917,7 +1334,7 @@ app.get("/api/kelas/template", authenticateToken, async (req, res) => {
 // Import kelas dari Excel
 app.post(
   "/api/kelas/import",
-  authenticateToken,
+  authenticateTokenAndSchool,
   excelUploadMiddleware,
   async (req, res) => {
     let connection;
@@ -977,7 +1394,6 @@ app.post(
 
 // Fungsi untuk membaca Excel kelas dari buffer
 async function readExcelClassesFromBuffer(buffer) {
-  const XLSX = require("xlsx");
 
   // Baca workbook langsung dari buffer
   const workbook = XLSX.read(buffer, { type: "buffer" });
@@ -1276,7 +1692,6 @@ app.post(
 
 // Fungsi untuk membaca Excel dari buffer (tanpa simpan file)
 async function readExcelFromBuffer(buffer) {
-  const XLSX = require("xlsx");
 
   // Baca workbook langsung dari buffer
   const workbook = XLSX.read(buffer, { type: "buffer" });
@@ -1861,36 +2276,6 @@ function mapExcelRowToStudent(row, rowNumber) {
   return student;
 }
 
-// Fungsi untuk membaca file Excel - PERBAIKAN
-async function readExcelFile(filePath) {
-  const XLSX = require("xlsx");
-  const workbook = XLSX.readFile(filePath);
-  const sheetName = workbook.SheetNames[0];
-  const worksheet = workbook.Sheets[sheetName];
-
-  // Konversi ke JSON
-  const data = XLSX.utils.sheet_to_json(worksheet);
-
-  console.log("Raw Excel data:", data);
-
-  const students = [];
-
-  data.forEach((row, index) => {
-    try {
-      // Mapping kolom dengan berbagai kemungkinan nama
-      const studentData = mapExcelRowToStudent(row, index + 2);
-      if (studentData) {
-        students.push(studentData);
-      }
-    } catch (error) {
-      console.error(`Error processing row ${index + 2}:`, error);
-    }
-  });
-
-  console.log(`Processed ${students.length} students from Excel`);
-  return students;
-}
-
 // Fungsi untuk memproses import siswa
 async function processStudentImport(importedStudents, classList) {
   let connection;
@@ -2027,32 +2412,6 @@ async function processStudentImport(importedStudents, classList) {
   }
 }
 
-// Fungsi helper untuk format tanggal
-function formatDate(dateValue) {
-  if (!dateValue) return "";
-
-  // Jika sudah dalam format string
-  if (typeof dateValue === "string") {
-    return dateValue;
-  }
-
-  // Jika dari Excel (number)
-  if (typeof dateValue === "number") {
-    const excelEpoch = new Date(1900, 0, 1);
-    const date = new Date(
-      excelEpoch.getTime() + (dateValue - 1) * 24 * 60 * 60 * 1000
-    );
-    return date.toISOString().slice(0, 10);
-  }
-
-  // Jika Date object
-  if (dateValue instanceof Date) {
-    return dateValue.toISOString().slice(0, 10);
-  }
-
-  return "";
-}
-
 // Download template Excel
 app.get("/api/siswa/template", authenticateToken, async (req, res) => {
   try {
@@ -2111,7 +2470,7 @@ app.get("/api/siswa/template", authenticateToken, async (req, res) => {
 });
 
 // Modifikasi endpoint POST siswa dengan transaction yang benar
-app.post("/api/siswa", authenticateToken, async (req, res) => {
+app.post("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
   let connection;
   try {
     console.log("Menambah siswa baru:", req.body);
@@ -2133,13 +2492,26 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
 
     connection = await getConnection();
 
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    if (kelas_id) {
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelas_id, req.sekolah_id]
+      );
+
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res.status(400).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
     // Mulai transaction
     await connection.beginTransaction();
 
     try {
-      // 1. Insert siswa terlebih dahulu
+      // 1. Insert siswa dengan sekolah_id
       await connection.execute(
-        "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           id,
           nis,
@@ -2150,6 +2522,7 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
           jenis_kelamin,
           nama_wali,
           no_telepon,
+          req.sekolah_id,  // Tambahkan sekolah_id
           createdAt,
           updatedAt,
         ]
@@ -2179,8 +2552,8 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
 
         await connection.execute(
-          'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
-          [waliId, nama_wali, email_wali, hashedPassword, id]
+          'INSERT INTO users (id, nama, email, password, role, siswa_id, sekolah_id) VALUES (?, ?, ?, ?, "wali", ?, ?)',
+          [waliId, nama_wali, email_wali, hashedPassword, id, req.sekolah_id]  // Tambahkan sekolah_id
         );
 
         console.log("User wali berhasil dibuat dengan ID:", waliId);
@@ -2225,8 +2598,7 @@ app.post("/api/siswa", authenticateToken, async (req, res) => {
 });
 
 // Modifikasi endpoint PUT siswa
-// Modifikasi endpoint PUT siswa - PERBAIKAN
-app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
+app.put("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -2240,11 +2612,35 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
       jenis_kelamin,
       nama_wali,
       no_telepon,
-      email_wali, // Tambahkan field email_wali
+      email_wali,
     } = req.body;
     const updatedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
 
     connection = await getConnection();
+
+    // Cek apakah siswa termasuk dalam sekolah yang sama
+    const [existingSiswa] = await connection.execute(
+      "SELECT id FROM siswa WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingSiswa.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Siswa tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    if (kelas_id) {
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelas_id, req.sekolah_id]
+      );
+
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res.status(400).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
 
     // Mulai transaction
     await connection.beginTransaction();
@@ -2252,7 +2648,7 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
     try {
       // Update siswa
       await connection.execute(
-        "UPDATE siswa SET nis = ?, nama = ?, kelas_id = ?, alamat = ?, tanggal_lahir = ?, jenis_kelamin = ?, nama_wali = ?, no_telepon = ?, updated_at = ? WHERE id = ?",
+        "UPDATE siswa SET nis = ?, nama = ?, kelas_id = ?, alamat = ?, tanggal_lahir = ?, jenis_kelamin = ?, nama_wali = ?, no_telepon = ?, updated_at = ? WHERE id = ? AND sekolah_id = ?",
         [
           nis,
           nama,
@@ -2264,6 +2660,7 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
           no_telepon,
           updatedAt,
           id,
+          req.sekolah_id,  // Tambahkan sekolah_id di WHERE
         ]
       );
 
@@ -2297,7 +2694,7 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
             [nama_wali, email_wali, id]
           );
         } else {
-          // BUAT USER WALI BARU - INI YANG DIPERBAIKI
+          // BUAT USER WALI BARU
           const waliId = crypto.randomUUID();
           const password = "password123";
           const hashedPassword = await bcrypt.hash(password, 10);
@@ -2317,8 +2714,8 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
           }
 
           await connection.execute(
-            'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
-            [waliId, nama_wali, email_wali, hashedPassword, id]
+            'INSERT INTO users (id, nama, email, password, role, siswa_id, sekolah_id) VALUES (?, ?, ?, ?, "wali", ?, ?)',
+            [waliId, nama_wali, email_wali, hashedPassword, id, req.sekolah_id]  // Tambahkan sekolah_id
           );
 
           console.log("User wali baru berhasil dibuat:", waliId);
@@ -2364,12 +2761,24 @@ app.put("/api/siswa/:id", authenticateToken, async (req, res) => {
 });
 
 // Modifikasi endpoint DELETE siswa
-app.delete("/api/siswa/:id", authenticateToken, async (req, res) => {
+app.delete("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
   try {
     const { id } = req.params;
     console.log("Delete siswa:", id);
 
-    const connection = await getConnection();
+    connection = await getConnection();
+
+    // Cek apakah siswa termasuk dalam sekolah yang sama
+    const [existingSiswa] = await connection.execute(
+      "SELECT id FROM siswa WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingSiswa.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Siswa tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Mulai transaction
     await connection.beginTransaction();
@@ -2382,7 +2791,10 @@ app.delete("/api/siswa/:id", authenticateToken, async (req, res) => {
       );
 
       // Hapus siswa
-      await connection.execute("DELETE FROM siswa WHERE id = ?", [id]);
+      await connection.execute(
+        "DELETE FROM siswa WHERE id = ? AND sekolah_id = ?",
+        [id, req.sekolah_id]  // Tambahkan sekolah_id di WHERE
+      );
 
       // Commit transaction
       await connection.commit();
@@ -2397,20 +2809,27 @@ app.delete("/api/siswa/:id", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("ERROR DELETE SISWA:", error.message);
     console.error("SQL Error code:", error.code);
+    
+    if (connection) {
+      await connection.end();
+    }
+    
     res.status(500).json({ error: "Gagal menghapus siswa" });
   }
 });
-
 // Kelola Siswa - Get Siswa by ID
-app.get("/api/siswa/:id", authenticateToken, async (req, res) => {
+app.get("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Mengambil data siswa by ID:", id);
 
     const connection = await getConnection();
     const [siswa] = await connection.execute(
-      "SELECT s.*, k.nama as kelas_nama FROM siswa s LEFT JOIN kelas k ON s.kelas_id = k.id WHERE s.id = ?",
-      [id]
+      `SELECT s.*, k.nama as kelas_nama 
+       FROM siswa s 
+       LEFT JOIN kelas k ON s.kelas_id = k.id 
+       WHERE s.id = ? AND s.sekolah_id = ?`,  // Tambahkan sekolah_id
+      [id, req.sekolah_id]
     );
     await connection.end();
 
@@ -2427,12 +2846,13 @@ app.get("/api/siswa/:id", authenticateToken, async (req, res) => {
 });
 
 // Get Mata Pelajaran
-app.get("/api/mata-pelajaran", authenticateToken, async (req, res) => {
+app.get("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data mata pelajaran");
+    console.log("Mengambil data mata pelajaran untuk sekolah:", req.sekolah_id);
     const connection = await getConnection();
     const [mataPelajaran] = await connection.execute(
-      "SELECT * FROM mata_pelajaran"
+      "SELECT * FROM mata_pelajaran WHERE sekolah_id = ?",  // Tambahkan filter sekolah_id
+      [req.sekolah_id]
     );
     await connection.end();
     console.log(
@@ -2446,53 +2866,53 @@ app.get("/api/mata-pelajaran", authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/api/export-subjects', async (req, res) => {
+app.post("/api/export-subjects", async (req, res) => {
   try {
     const { subjects } = req.body;
 
     if (!subjects || !Array.isArray(subjects)) {
       return res.status(400).json({
         success: false,
-        message: 'Data mata pelajaran tidak valid'
+        message: "Data mata pelajaran tidak valid",
       });
     }
 
     // Create new workbook
     const workbook = XLSX.utils.book_new();
-    
+
     // Prepare data for Excel
     const excelData = [
       // Header row
-      ['Kode*', 'Nama*', 'Deskripsi', 'Kelas', 'Status'],
+      ["Kode*", "Nama*", "Deskripsi", "Kelas", "Status"],
       // Data rows
-      ...subjects.map(subject => [
-        subject.kode || '',
-        subject.nama || '',
-        subject.deskripsi || '',
+      ...subjects.map((subject) => [
+        subject.kode || "",
+        subject.nama || "",
+        subject.deskripsi || "",
         getClassNames(subject),
-        'Active'
-      ])
+        "Active",
+      ]),
     ];
 
     // Create worksheet
     const worksheet = XLSX.utils.aoa_to_sheet(excelData);
 
     // Add style to header row (basic styling)
-    if (!worksheet['!cols']) worksheet['!cols'] = [];
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
     for (let i = 0; i < 5; i++) {
-      worksheet['!cols'][i] = { width: 15 };
+      worksheet["!cols"][i] = { width: 15 };
     }
 
     // Add worksheet to workbook
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data Mata Pelajaran');
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data Mata Pelajaran");
 
     // Generate filename
     const filename = `Data_Mata_Pelajaran_${Date.now()}.xlsx`;
-    const filePath = path.join(__dirname, '../temp', filename);
+    const filePath = path.join(__dirname, "../temp", filename);
 
     // Ensure temp directory exists
-    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
-      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
     }
 
     // Write file
@@ -2501,10 +2921,10 @@ app.post('/api/export-subjects', async (req, res) => {
     // Send file as response
     res.download(filePath, filename, (err) => {
       if (err) {
-        console.error('Error downloading file:', err);
+        console.error("Error downloading file:", err);
         res.status(500).json({
           success: false,
-          message: 'Gagal mengunduh file'
+          message: "Gagal mengunduh file",
         });
       }
 
@@ -2515,58 +2935,61 @@ app.post('/api/export-subjects', async (req, res) => {
         }
       }, 5000);
     });
-
   } catch (error) {
-    console.error('Export subjects error:', error);
+    console.error("Export subjects error:", error);
     res.status(500).json({
       success: false,
-      message: `Gagal mengexport data: ${error.message}`
+      message: `Gagal mengexport data: ${error.message}`,
     });
   }
 });
 
 // Download template Excel untuk mata pelajaran
-app.get('/api/download-subject-template', async (req, res) => {
+app.get("/api/download-subject-template", async (req, res) => {
   try {
     // Create new workbook
     const workbook = XLSX.utils.book_new();
-    
+
     // Prepare template data
     const templateData = [
       // Header row
-      ['Kode', 'Nama', 'Deskripsi', 'Kelas'],
+      ["Kode", "Nama", "Deskripsi", "Kelas"],
       // Example data
-      ['BI-7', 'Bahasa Indonesia', 'Bahasa Indonesia untuk kelas 7', '7A'],
-      ['BIN-7', 'Bahasa Inggris', 'Bahasa Inggris untuk kelas 7', '7A'],
-      ['MTK-7', 'Matematika', 'Matematika untuk kelas 7', '7A,7B'],
-      ['IPA-7', 'Ilmu Pengetahuan Alam', 'IPA untuk kelas 7', '7A,7B,7C'],
+      ["BI-7", "Bahasa Indonesia", "Bahasa Indonesia untuk kelas 7", "7A"],
+      ["BIN-7", "Bahasa Inggris", "Bahasa Inggris untuk kelas 7", "7A"],
+      ["MTK-7", "Matematika", "Matematika untuk kelas 7", "7A,7B"],
+      ["IPA-7", "Ilmu Pengetahuan Alam", "IPA untuk kelas 7", "7A,7B,7C"],
       // Empty row
       [],
       // Notes
-      ['* Wajib diisi'],
-      ['Kelas: Pisahkan dengan koma jika multiple'],
-      ['Contoh: 7A,7B,8A']
+      ["* Wajib diisi"],
+      ["Kelas: Pisahkan dengan koma jika multiple"],
+      ["Contoh: 7A,7B,8A"],
     ];
 
     // Create worksheet
     const worksheet = XLSX.utils.aoa_to_sheet(templateData);
 
     // Set column widths
-    if (!worksheet['!cols']) worksheet['!cols'] = [];
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
     for (let i = 0; i < 4; i++) {
-      worksheet['!cols'][i] = { width: 20 };
+      worksheet["!cols"][i] = { width: 20 };
     }
 
     // Add worksheet to workbook
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Template Mata Pelajaran');
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      "Template Mata Pelajaran"
+    );
 
     // Generate filename
-    const filename = 'Template_Import_Mata_Pelajaran.xlsx';
-    const filePath = path.join(__dirname, '../temp', filename);
+    const filename = "Template_Import_Mata_Pelajaran.xlsx";
+    const filePath = path.join(__dirname, "../temp", filename);
 
     // Ensure temp directory exists
-    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
-      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
     }
 
     // Write file
@@ -2575,10 +2998,10 @@ app.get('/api/download-subject-template', async (req, res) => {
     // Send file as response
     res.download(filePath, filename, (err) => {
       if (err) {
-        console.error('Error downloading template:', err);
+        console.error("Error downloading template:", err);
         res.status(500).json({
           success: false,
-          message: 'Gagal mengunduh template'
+          message: "Gagal mengunduh template",
         });
       }
 
@@ -2589,24 +3012,23 @@ app.get('/api/download-subject-template', async (req, res) => {
         }
       }, 5000);
     });
-
   } catch (error) {
-    console.error('Subject template download error:', error);
+    console.error("Subject template download error:", error);
     res.status(500).json({
       success: false,
-      message: `Gagal mengunduh template: ${error.message}`
+      message: `Gagal mengunduh template: ${error.message}`,
     });
   }
 });
 
-app.post('/api/validate-subjects', async (req, res) => {
+app.post("/api/validate-subjects", async (req, res) => {
   try {
     const { subjects } = req.body;
 
     if (!subjects || !Array.isArray(subjects)) {
       return res.status(400).json({
         success: false,
-        message: 'Data mata pelajaran tidak valid'
+        message: "Data mata pelajaran tidak valid",
       });
     }
 
@@ -2619,14 +3041,14 @@ app.post('/api/validate-subjects', async (req, res) => {
       let hasError = false;
 
       // Validasi field required
-      if (!subject.kode || subject.kode.toString().trim() === '') {
+      if (!subject.kode || subject.kode.toString().trim() === "") {
         errors.push(`Baris ${i + 1}: Kode mata pelajaran tidak boleh kosong`);
         hasError = true;
       } else {
         validatedSubject.kode = subject.kode.toString().trim();
       }
 
-      if (!subject.nama || subject.nama.toString().trim() === '') {
+      if (!subject.nama || subject.nama.toString().trim() === "") {
         errors.push(`Baris ${i + 1}: Nama mata pelajaran tidak boleh kosong`);
         hasError = true;
       } else {
@@ -2634,8 +3056,8 @@ app.post('/api/validate-subjects', async (req, res) => {
       }
 
       // Field optional
-      validatedSubject.deskripsi = subject.deskripsi || '';
-      validatedSubject.kelas = subject.kelas || '';
+      validatedSubject.deskripsi = subject.deskripsi || "";
+      validatedSubject.kelas = subject.kelas || "";
 
       if (!hasError) {
         validatedData.push(validatedSubject);
@@ -2645,23 +3067,22 @@ app.post('/api/validate-subjects', async (req, res) => {
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Validasi data gagal',
+        message: "Validasi data gagal",
         errors: errors,
-        validatedData: validatedData
+        validatedData: validatedData,
       });
     }
 
     res.json({
       success: true,
-      message: 'Validasi data berhasil',
-      validatedData: validatedData
+      message: "Validasi data berhasil",
+      validatedData: validatedData,
     });
-
   } catch (error) {
-    console.error('Subject validation error:', error);
+    console.error("Subject validation error:", error);
     res.status(500).json({
       success: false,
-      message: `Gagal validasi data: ${error.message}`
+      message: `Gagal validasi data: ${error.message}`,
     });
   }
 });
@@ -2670,12 +3091,12 @@ function getClassNames(subject) {
   if (subject.kelas_names) {
     return subject.kelas_names;
   }
-  
+
   if (subject.kelas_list && Array.isArray(subject.kelas_list)) {
-    return subject.kelas_list.map(kelas => kelas.nama || '').join(', ');
+    return subject.kelas_list.map((kelas) => kelas.nama || "").join(", ");
   }
-  
-  return '';
+
+  return "";
 }
 
 // Import mata pelajaran dari Excel
@@ -2997,15 +3418,15 @@ app.post(
 );
 
 // Get Mata Pelajaran by ID
-app.get("/api/mata-pelajaran/:id", authenticateToken, async (req, res) => {
+app.get("/api/mata-pelajaran/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Mengambil data mata pelajaran by ID:", id);
 
     const connection = await getConnection();
     const [mataPelajaran] = await connection.execute(
-      "SELECT * FROM mata_pelajaran WHERE id = ?",
-      [id]
+      "SELECT * FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",  // Tambahkan sekolah_id
+      [id, req.sekolah_id]
     );
     await connection.end();
 
@@ -3022,7 +3443,7 @@ app.get("/api/mata-pelajaran/:id", authenticateToken, async (req, res) => {
 });
 
 // Create Mata Pelajaran
-app.post("/api/mata-pelajaran", authenticateToken, async (req, res) => {
+app.post("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah mata pelajaran baru:", req.body);
     const { kode, nama, deskripsi } = req.body;
@@ -3030,8 +3451,8 @@ app.post("/api/mata-pelajaran", authenticateToken, async (req, res) => {
 
     const connection = await getConnection();
     await connection.execute(
-      "INSERT INTO mata_pelajaran (id, kode, nama, deskripsi) VALUES (?, ?, ?, ?)",
-      [id, kode, nama, deskripsi]
+      "INSERT INTO mata_pelajaran (id, kode, nama, deskripsi, sekolah_id) VALUES (?, ?, ?, ?, ?)",  // Tambahkan sekolah_id
+      [id, kode, nama, deskripsi, req.sekolah_id]
     );
     await connection.end();
 
@@ -3052,16 +3473,28 @@ app.post("/api/mata-pelajaran", authenticateToken, async (req, res) => {
 });
 
 // Update Mata Pelajaran
-app.put("/api/mata-pelajaran/:id", authenticateToken, async (req, res) => {
+app.put("/api/mata-pelajaran/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Update mata pelajaran:", id, req.body);
     const { kode, nama, deskripsi } = req.body;
 
     const connection = await getConnection();
+    
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [existingMapel] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingMapel.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
     await connection.execute(
-      "UPDATE mata_pelajaran SET kode = ?, nama = ?, deskripsi = ? WHERE id = ?",
-      [kode, nama, deskripsi, id]
+      "UPDATE mata_pelajaran SET kode = ?, nama = ?, deskripsi = ? WHERE id = ? AND sekolah_id = ?",  // Tambahkan sekolah_id di WHERE
+      [kode, nama, deskripsi, id, req.sekolah_id]
     );
     await connection.end();
 
@@ -3082,13 +3515,54 @@ app.put("/api/mata-pelajaran/:id", authenticateToken, async (req, res) => {
 });
 
 // Delete Mata Pelajaran
-app.delete("/api/mata-pelajaran/:id", authenticateToken, async (req, res) => {
+app.delete("/api/mata-pelajaran/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Delete mata pelajaran:", id);
 
     const connection = await getConnection();
-    await connection.execute("DELETE FROM mata_pelajaran WHERE id = ?", [id]);
+    
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [existingMapel] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingMapel.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran masih digunakan di guru_mata_pelajaran
+    const [guruMapel] = await connection.execute(
+      "SELECT id FROM guru_mata_pelajaran WHERE mata_pelajaran_id = ?",
+      [id]
+    );
+
+    if (guruMapel.length > 0) {
+      await connection.end();
+      return res.status(400).json({
+        error: "Mata pelajaran tidak dapat dihapus karena masih digunakan oleh guru",
+      });
+    }
+
+    // Cek apakah mata pelajaran masih digunakan di jadwal_pelajaran
+    const [jadwal] = await connection.execute(
+      "SELECT id FROM jadwal_pelajaran WHERE mata_pelajaran_id = ?",
+      [id]
+    );
+
+    if (jadwal.length > 0) {
+      await connection.end();
+      return res.status(400).json({
+        error: "Mata pelajaran tidak dapat dihapus karena masih digunakan dalam jadwal pelajaran",
+      });
+    }
+
+    await connection.execute(
+      "DELETE FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",  // Tambahkan sekolah_id di WHERE
+      [id, req.sekolah_id]
+    );
     await connection.end();
 
     console.log("Mata pelajaran berhasil dihapus:", id);
@@ -3108,14 +3582,14 @@ app.delete("/api/mata-pelajaran/:id", authenticateToken, async (req, res) => {
 });
 
 // Ganti query di endpoint /api/guru/:id
-app.get("/api/guru/:id", authenticateToken, async (req, res) => {
+app.get("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Mengambil data guru by ID:", id);
 
     const connection = await getConnection();
 
-    // Query yang diperbaiki - ambil data guru dengan mata pelajaran dari tabel many-to-many
+    // Query yang diperbaiki - dengan filter sekolah_id
     const [guru] = await connection.execute(
       `
       SELECT 
@@ -3128,10 +3602,10 @@ app.get("/api/guru/:id", authenticateToken, async (req, res) => {
       LEFT JOIN kelas k ON u.kelas_id = k.id 
       LEFT JOIN guru_mata_pelajaran gmp ON u.id = gmp.guru_id
       LEFT JOIN mata_pelajaran mp ON gmp.mata_pelajaran_id = mp.id
-      WHERE u.id = ?
+      WHERE u.id = ? AND u.sekolah_id = ? AND u.role = 'guru'
       GROUP BY u.id
     `,
-      [id]
+      [id, req.sekolah_id] // Tambahkan sekolah_id
     );
 
     await connection.end();
@@ -3593,11 +4067,10 @@ app.post(
   }
 );
 
-app.post("/api/guru", authenticateToken, async (req, res) => {
+app.post("/api/guru", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah guru baru:", req.body);
 
-    // Hapus mata_pelajaran_id dari data karena sekarang menggunakan many-to-many
     const { nama, email, kelas_id, nip, is_wali_kelas } = req.body;
     const id = crypto.randomUUID();
 
@@ -3616,9 +4089,9 @@ app.post("/api/guru", authenticateToken, async (req, res) => {
 
       const connection = await getConnection();
 
-      // Hapus mata_pelajaran_id dari query
+      // Tambahkan sekolah_id ke query INSERT
       await connection.execute(
-        'INSERT INTO users (id, nama, email, password, role, kelas_id, nip, is_wali_kelas) VALUES (?, ?, ?, ?, "guru", ?, ?, ?)',
+        'INSERT INTO users (id, nama, email, password, role, kelas_id, nip, is_wali_kelas, sekolah_id) VALUES (?, ?, ?, ?, "guru", ?, ?, ?, ?)',
         [
           id,
           nama,
@@ -3627,6 +4100,7 @@ app.post("/api/guru", authenticateToken, async (req, res) => {
           kelas_id || null,
           nip || null,
           is_wali_kelas || false,
+          req.sekolah_id // Tambahkan sekolah_id dari token
         ]
       );
 
@@ -3657,8 +4131,7 @@ app.post("/api/guru", authenticateToken, async (req, res) => {
 });
 
 // Update Guru dengan Mata Pelajaran
-// Update Guru - Hapus mata_pelajaran_id dari update karena sekarang menggunakan many-to-many
-app.put("/api/guru/:id", authenticateToken, async (req, res) => {
+app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Update guru:", id, req.body);
@@ -3673,6 +4146,17 @@ app.put("/api/guru/:id", authenticateToken, async (req, res) => {
 
     const connection = await getConnection();
 
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [existingGuru] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (existingGuru.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
+
     const updateData = [
       nama,
       email,
@@ -3680,12 +4164,13 @@ app.put("/api/guru/:id", authenticateToken, async (req, res) => {
       cleanNip,
       cleanIsWaliKelas,
       id,
+      req.sekolah_id // Tambahkan di WHERE clause
     ];
 
     console.log("Update data:", updateData);
 
     await connection.execute(
-      "UPDATE users SET nama = ?, email = ?, kelas_id = ?, nip = ?, is_wali_kelas = ? WHERE id = ?",
+      "UPDATE users SET nama = ?, email = ?, kelas_id = ?, nip = ?, is_wali_kelas = ? WHERE id = ? AND sekolah_id = ?",
       updateData
     );
 
@@ -3707,10 +4192,10 @@ app.put("/api/guru/:id", authenticateToken, async (req, res) => {
 });
 
 // Kelola Absensi
-app.get("/api/absensi", authenticateToken, async (req, res) => {
+app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
   try {
-    const { guru_id, tanggal, mata_pelajaran_id, siswa_id } = req.query; // Tambahkan siswa_id
-    console.log("Mengambil data absensi");
+    const { guru_id, tanggal, mata_pelajaran_id, siswa_id } = req.query;
+    console.log("Mengambil data absensi untuk sekolah:", req.sekolah_id);
 
     let query = `
       SELECT a.*, s.nama as siswa_nama, s.nis, k.nama as kelas_nama, mp.nama as mata_pelajaran_nama
@@ -3718,9 +4203,9 @@ app.get("/api/absensi", authenticateToken, async (req, res) => {
       JOIN siswa s ON a.siswa_id = s.id
       JOIN kelas k ON s.kelas_id = k.id
       JOIN mata_pelajaran mp ON a.mata_pelajaran_id = mp.id
-      WHERE 1=1
+      WHERE s.sekolah_id = ? AND mp.sekolah_id = ?
     `;
-    let params = [];
+    let params = [req.sekolah_id, req.sekolah_id];
 
     if (guru_id) {
       query += " AND a.guru_id = ?";
@@ -3754,6 +4239,292 @@ app.get("/api/absensi", authenticateToken, async (req, res) => {
   }
 });
 
+// Export data absensi ke Excel
+app.post("/api/export-presence", async (req, res) => {
+  try {
+    const { presenceData, filters = {} } = req.body;
+
+    console.log("Exporting presence data:", {
+      dataCount: presenceData?.length,
+      filters: filters,
+    });
+
+    if (!presenceData || !Array.isArray(presenceData)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data absensi tidak valid",
+      });
+    }
+
+    if (presenceData.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Tidak ada data absensi untuk diexport",
+      });
+    }
+
+    // Debug: Log sample data
+    console.log("Sample data:", presenceData.slice(0, 2));
+
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Prepare data for Excel - PERBAIKI MAPPING DATA
+    const excelData = [
+      // Header row
+      [
+        "NIS",
+        "Nama Siswa",
+        "Kelas",
+        "Mata Pelajaran",
+        "Tanggal",
+        "Hari",
+        "Status",
+        "Keterangan",
+        "Guru Pengajar",
+        "Jam Pelajaran",
+      ],
+      // Data rows - PERBAIKI ACCESSOR FIELDS
+      ...presenceData.map((presence) => {
+        // Format tanggal dari ISO string ke format readable
+        const tanggal = presence.tanggal
+          ? new Date(presence.tanggal).toISOString().split("T")[0]
+          : "";
+
+        // Get day name
+        const hari = presence.tanggal ? getDayName(presence.tanggal) : "";
+
+        // Get status label
+        const status = getStatusLabel(presence.status);
+
+        return [
+          presence.nis || "",
+          presence.siswa_nama || "",
+          presence.kelas_nama || "",
+          presence.mata_pelajaran_nama || "",
+          tanggal,
+          hari,
+          status,
+          presence.keterangan || "",
+          presence.guru_nama || "", // Pastikan field ini ada di data
+          presence.jam_pelajaran || "", // Pastikan field ini ada di data
+        ];
+      }),
+    ];
+
+    console.log("Excel data prepared, rows:", excelData.length);
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+    // Set column widths for better readability
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    const columnWidths = [12, 20, 15, 20, 12, 10, 12, 20, 20, 15];
+    for (let i = 0; i < columnWidths.length; i++) {
+      worksheet["!cols"][i] = { width: columnWidths[i] };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data Absensi");
+
+    // Generate Excel buffer
+    const excelBuffer = XLSX.write(workbook, {
+      type: "buffer",
+      bookType: "xlsx",
+    });
+
+    console.log("Excel file generated successfully, size:", excelBuffer.length);
+
+    // Set headers untuk file download
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="Data_Absensi_${Date.now()}.xlsx"`
+    );
+    res.setHeader("Content-Length", excelBuffer.length);
+
+    // Kirim file buffer
+    res.send(excelBuffer);
+  } catch (error) {
+    console.error("EXPORT PRESENCE ERROR:", error.message);
+    console.error("Error stack:", error.stack);
+
+    // Pastikan mengirim JSON error response
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengexport data absensi: ${error.message}`,
+      error: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+});
+
+// Helper functions - PASTIKAN ADA
+function getStatusLabel(status) {
+  if (!status) return "";
+
+  switch (status.toLowerCase()) {
+    case "hadir":
+      return "Hadir";
+    case "terlambat":
+      return "Terlambat";
+    case "izin":
+      return "Izin";
+    case "sakit":
+      return "Sakit";
+    case "alpha":
+      return "Alpha";
+    default:
+      return status;
+  }
+}
+
+function getDayName(dateString) {
+  if (!dateString) return "";
+
+  try {
+    const days = [
+      "Minggu",
+      "Senin",
+      "Selasa",
+      "Rabu",
+      "Kamis",
+      "Jumat",
+      "Sabtu",
+    ];
+    const date = new Date(dateString);
+    return days[date.getDay()];
+  } catch (error) {
+    console.error("Error parsing date:", error);
+    return "";
+  }
+}
+// Validasi data absensi sebelum import
+app.post("/api/validate-presence", authenticateToken, async (req, res) => {
+  try {
+    const { presenceData } = req.body;
+
+    if (!presenceData || !Array.isArray(presenceData)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data absensi tidak valid",
+      });
+    }
+
+    const validatedData = [];
+    const errors = [];
+
+    for (let i = 0; i < presenceData.length; i++) {
+      const presence = presenceData[i];
+      const validatedPresence = {};
+      let hasError = false;
+
+      // Validasi field required
+      if (!presence.nis || presence.nis.toString().trim() === "") {
+        errors.push(`Baris ${i + 1}: NIS tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedPresence.nis = presence.nis.toString().trim();
+      }
+
+      if (
+        !presence.siswa_nama ||
+        presence.siswa_nama.toString().trim() === ""
+      ) {
+        errors.push(`Baris ${i + 1}: Nama siswa tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedPresence.siswa_nama = presence.siswa_nama.toString().trim();
+      }
+
+      if (
+        !presence.kelas_nama ||
+        presence.kelas_nama.toString().trim() === ""
+      ) {
+        errors.push(`Baris ${i + 1}: Kelas tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedPresence.kelas_nama = presence.kelas_nama.toString().trim();
+      }
+
+      if (
+        !presence.mata_pelajaran_nama ||
+        presence.mata_pelajaran_nama.toString().trim() === ""
+      ) {
+        errors.push(`Baris ${i + 1}: Mata pelajaran tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedPresence.mata_pelajaran_nama = presence.mata_pelajaran_nama
+          .toString()
+          .trim();
+      }
+
+      if (!presence.tanggal || presence.tanggal.toString().trim() === "") {
+        errors.push(`Baris ${i + 1}: Tanggal tidak boleh kosong`);
+        hasError = true;
+      } else {
+        validatedPresence.tanggal = presence.tanggal.toString().trim();
+      }
+
+      if (!presence.status || presence.status.toString().trim() === "") {
+        errors.push(`Baris ${i + 1}: Status tidak boleh kosong`);
+        hasError = true;
+      } else {
+        const status = presence.status.toString().trim().toLowerCase();
+        const allowedStatus = ["hadir", "terlambat", "izin", "sakit", "alpha"];
+        if (!allowedStatus.includes(status)) {
+          errors.push(
+            `Baris ${
+              i + 1
+            }: Status harus salah satu dari: hadir, terlambat, izin, sakit, alpha`
+          );
+          hasError = true;
+        } else {
+          validatedPresence.status = status;
+        }
+      }
+
+      // Field optional
+      validatedPresence.keterangan = presence.keterangan || "";
+      validatedPresence.guru_nama = presence.guru_nama || "";
+      validatedPresence.jam_pelajaran = presence.jam_pelajaran || "";
+
+      if (!hasError) {
+        validatedData.push(validatedPresence);
+      }
+    }
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Validasi data absensi gagal",
+        errors: errors,
+        validatedData: validatedData,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Validasi data absensi berhasil",
+      validatedData: validatedData,
+    });
+  } catch (error) {
+    console.error("Presence validation error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal validasi data absensi: ${error.message}`,
+    });
+  }
+});
+
+function getDayName(dateString) {
+  const days = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
+  const date = new Date(dateString);
+  return days[date.getDay()];
+}
+
 // Debug endpoint untuk cek struktur tabel absensi
 app.get("/api/debug/absensi-structure", authenticateToken, async (req, res) => {
   try {
@@ -3783,7 +4554,7 @@ app.get("/api/debug/absensi-data", authenticateToken, async (req, res) => {
 });
 
 // Perbaiki endpoint POST absensi dengan validasi lengkap
-app.post("/api/absensi", authenticateToken, async (req, res) => {
+app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah absensi:", req.body);
     const {
@@ -3807,13 +4578,6 @@ app.post("/api/absensi", authenticateToken, async (req, res) => {
       return res.status(400).json({
         error: "Data tidak lengkap",
         missing_fields: missingFields,
-        received_data: {
-          siswa_id: !!siswa_id,
-          guru_id: !!guru_id,
-          mata_pelajaran_id: !!mata_pelajaran_id,
-          tanggal: !!tanggal,
-          status: !!status,
-        },
       });
     }
 
@@ -3828,8 +4592,40 @@ app.post("/api/absensi", authenticateToken, async (req, res) => {
     }
 
     const id = crypto.randomUUID();
-
     const connection = await getConnection();
+
+    // Cek apakah siswa termasuk dalam sekolah yang sama
+    const [siswaCheck] = await connection.execute(
+      "SELECT id FROM siswa WHERE id = ? AND sekolah_id = ?",
+      [siswa_id, req.sekolah_id]
+    );
+
+    if (siswaCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Siswa tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guru_id, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Cek apakah absensi sudah ada untuk kombinasi yang sama
     const [existing] = await connection.execute(
@@ -3875,12 +4671,10 @@ app.post("/api/absensi", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("ERROR POST ABSENSI:", error.message);
     console.error("SQL Error code:", error.code);
-    console.error("Error details:", error);
 
     if (error.code === "ER_NO_SUCH_TABLE") {
       return res.status(500).json({
-        error:
-          "Tabel absensi tidak ditemukan. Silakan buat tabel terlebih dahulu.",
+        error: "Tabel absensi tidak ditemukan. Silakan buat tabel terlebih dahulu.",
       });
     }
 
@@ -3893,8 +4687,7 @@ app.post("/api/absensi", authenticateToken, async (req, res) => {
 
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(400).json({
-        error:
-          "Absensi untuk siswa ini sudah ada pada tanggal dan mata pelajaran yang sama",
+        error: "Absensi untuk siswa ini sudah ada pada tanggal dan mata pelajaran yang sama",
       });
     }
 
@@ -3906,19 +4699,19 @@ app.post("/api/absensi", authenticateToken, async (req, res) => {
 });
 
 // Kelola Nilai
-app.get("/api/nilai", authenticateToken, async (req, res) => {
+app.get("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { siswa_id, guru_id, mata_pelajaran_id, jenis } = req.query;
-    console.log("Mengambil data nilai");
+    console.log("Mengambil data nilai untuk sekolah:", req.sekolah_id);
 
     let query = `
       SELECT n.*, s.nama as siswa_nama, s.nis, mp.nama as mata_pelajaran_nama
       FROM nilai n
       JOIN siswa s ON n.siswa_id = s.id
       JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id
-      WHERE 1=1
+      WHERE s.sekolah_id = ? AND mp.sekolah_id = ? AND n.sekolah_id = ?
     `;
-    let params = [];
+    let params = [req.sekolah_id, req.sekolah_id, req.sekolah_id];
 
     if (siswa_id) {
       query += " AND n.siswa_id = ?";
@@ -3952,7 +4745,127 @@ app.get("/api/nilai", authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/api/nilai", authenticateToken, async (req, res) => {
+app.post("/api/export-nilai", async (req, res) => {
+  try {
+    const { nilaiData, filters = {} } = req.body;
+
+    if (!nilaiData || !Array.isArray(nilaiData)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data nilai tidak valid",
+      });
+    }
+
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Prepare data for Excel
+    const excelData = [
+      // Header row
+      [
+        "NIS",
+        "Nama Siswa",
+        "Kelas",
+        "Mata Pelajaran",
+        "Jenis Nilai",
+        "Nilai",
+        "Deskripsi",
+        "Tanggal",
+        "Guru Pengajar",
+      ],
+      // Data rows
+      ...nilaiData.map((nilai) => [
+        nilai.nis || "",
+        nilai.nama_siswa || "",
+        nilai.kelas_nama || "",
+        nilai.mata_pelajaran_nama || "",
+        getJenisNilaiLabel(nilai.jenis),
+        nilai.nilai?.toString() || "",
+        nilai.deskripsi || "",
+        formatDateForExport(nilai.tanggal),
+        nilai.guru_nama || "",
+      ]),
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+    // Set column widths for better readability
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    const columnWidths = [12, 20, 15, 20, 12, 8, 25, 12, 20];
+    for (let i = 0; i < columnWidths.length; i++) {
+      worksheet["!cols"][i] = { width: columnWidths[i] };
+    }
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data Nilai");
+
+    // Generate filename
+    const filename = `Data_Nilai_${Date.now()}.xlsx`;
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading file:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh file",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    console.error("Export nilai error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengexport data nilai: ${error.message}`,
+    });
+  }
+});
+
+function getJenisNilaiLabel(jenis) {
+  switch (jenis) {
+    case "harian":
+      return "Harian";
+    case "tugas":
+      return "Tugas";
+    case "ulangan":
+      return "Ulangan";
+    case "uts":
+      return "UTS";
+    case "uas":
+      return "UAS";
+    default:
+      return jenis;
+  }
+}
+
+function formatDateForExport(date) {
+  if (!date) return "";
+  try {
+    const parsed = new Date(date);
+    return parsed.toISOString().split("T")[0];
+  } catch (e) {
+    return date;
+  }
+}
+
+app.post("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah nilai:", req.body);
     const {
@@ -3964,11 +4877,53 @@ app.post("/api/nilai", authenticateToken, async (req, res) => {
       deskripsi,
       tanggal,
     } = req.body;
-    const id = crypto.randomUUID();
 
+    const id = crypto.randomUUID();
     const connection = await getConnection();
+
+    // Cek apakah siswa termasuk dalam sekolah yang sama
+    const [siswaCheck] = await connection.execute(
+      "SELECT id FROM siswa WHERE id = ? AND sekolah_id = ?",
+      [siswa_id, req.sekolah_id]
+    );
+
+    if (siswaCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Siswa tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    const [nilaiExist] = await connection.execute(
+      "SELECT id FROM nilai WHERE id = ? AND sekolah_id = ?",
+    )
+    if (nilaiExist.length > 0) {
+      await connection.end();
+      return res.status(400).json({ error: "Nilai dengan ID tersebut sudah ada" });
+    }
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guru_id, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
+
     await connection.execute(
-      "INSERT INTO nilai (id, siswa_id, guru_id, mata_pelajaran_id, jenis, nilai, deskripsi, tanggal) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO nilai (id, siswa_id, guru_id, mata_pelajaran_id, jenis, nilai, deskripsi, tanggal, sekolah_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         siswa_id,
@@ -3978,6 +4933,7 @@ app.post("/api/nilai", authenticateToken, async (req, res) => {
         nilaiValue,
         deskripsi,
         tanggal,
+        req.sekolah_id
       ]
     );
     await connection.end();
@@ -3992,7 +4948,7 @@ app.post("/api/nilai", authenticateToken, async (req, res) => {
 });
 
 // Update Nilai
-app.put("/api/nilai/:id", authenticateToken, async (req, res) => {
+app.put("/api/nilai/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Update nilai:", id, req.body);
@@ -4007,6 +4963,43 @@ app.put("/api/nilai/:id", authenticateToken, async (req, res) => {
     } = req.body;
 
     const connection = await getConnection();
+
+    // Cek apakah nilai termasuk dalam sekolah yang sama melalui relasi siswa/mapel
+    const [nilaiCheck] = await connection.execute(
+      `SELECT n.id 
+       FROM nilai n
+       JOIN siswa s ON n.siswa_id = s.id
+       JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id
+       WHERE n.id = ? AND s.sekolah_id = ? AND mp.sekolah_id = ?, AND n.sekolah_id = ?`,
+      [id, req.sekolah_id, req.sekolah_id, req.sekolah_id]
+    );
+
+    if (nilaiCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Nilai tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Validasi data terkait
+    const [siswaCheck] = await connection.execute(
+      "SELECT id FROM siswa WHERE id = ? AND sekolah_id = ?",
+      [siswa_id, req.sekolah_id]
+    );
+
+    if (siswaCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Siswa tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
     await connection.execute(
       "UPDATE nilai SET siswa_id = ?, guru_id = ?, mata_pelajaran_id = ?, jenis = ?, nilai = ?, deskripsi = ?, tanggal = ? WHERE id = ?",
       [
@@ -4032,12 +5025,28 @@ app.put("/api/nilai/:id", authenticateToken, async (req, res) => {
 });
 
 // Delete Nilai
-app.delete("/api/nilai/:id", authenticateToken, async (req, res) => {
+app.delete("/api/nilai/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Delete nilai:", id);
 
     const connection = await getConnection();
+
+    // Cek apakah nilai termasuk dalam sekolah yang sama
+    const [nilaiCheck] = await connection.execute(
+      `SELECT n.id 
+       FROM nilai n
+       JOIN siswa s ON n.siswa_id = s.id
+       JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id
+       WHERE n.id = ? AND s.sekolah_id = ? AND mp.sekolah_id = ? AND n.sekolah_id = ?`,
+      [id, req.sekolah_id, req.sekolah_id, req.sekolah_id]
+    );
+
+    if (nilaiCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Nilai tidak ditemukan atau tidak memiliki akses" });
+    }
+
     await connection.execute("DELETE FROM nilai WHERE id = ?", [id]);
     await connection.end();
 
@@ -4051,15 +5060,19 @@ app.delete("/api/nilai/:id", authenticateToken, async (req, res) => {
 });
 
 // Get Nilai by ID
-app.get("/api/nilai/:id", authenticateToken, async (req, res) => {
+app.get("/api/nilai/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Mengambil data nilai by ID:", id);
 
     const connection = await getConnection();
     const [nilai] = await connection.execute(
-      "SELECT n.*, s.nama as siswa_nama, s.nis, mp.nama as mata_pelajaran_nama FROM nilai n JOIN siswa s ON n.siswa_id = s.id JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id WHERE n.id = ?",
-      [id]
+      `SELECT n.*, s.nama as siswa_nama, s.nis, mp.nama as mata_pelajaran_nama 
+       FROM nilai n 
+       JOIN siswa s ON n.siswa_id = s.id 
+       JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id 
+       WHERE n.id = ? AND s.sekolah_id = ? AND mp.sekolah_id = ? AND n.sekolah_id = ?`,
+      [id, req.sekolah_id, req.sekolah_id, req.sekolah_id]
     );
     await connection.end();
 
@@ -4460,8 +5473,8 @@ app.get("/api/mata-pelajaran-by-guru", authenticateToken, async (req, res) => {
       `SELECT mp.* 
        FROM mata_pelajaran mp
        JOIN users u ON mp.id = u.mata_pelajaran_id
-       WHERE u.id = ?`,
-      [guru_id]
+       WHERE u.id = ? AND u.sekolah_id = ?`,
+      [guru_id, req.sekolah_id]
     );
 
     await connection.end();
@@ -4477,25 +5490,26 @@ app.get("/api/mata-pelajaran-by-guru", authenticateToken, async (req, res) => {
 // Get all Mata Pelajaran with Kelas
 app.get(
   "/api/mata-pelajaran-with-kelas",
-  authenticateToken,
+  authenticateTokenAndSchool,
   async (req, res) => {
     try {
-      console.log("Mengambil mata pelajaran dengan data kelas");
+      console.log("Mengambil mata pelajaran dengan data kelas untuk sekolah:", req.sekolah_id);
 
       const connection = await getConnection();
 
       const [mataPelajaran] = await connection.execute(`
-      SELECT 
-        mp.*,
-        GROUP_CONCAT(DISTINCT k.nama) as kelas_names,
-        GROUP_CONCAT(DISTINCT k.id) as kelas_ids,
-        COUNT(DISTINCT k.id) as jumlah_kelas
-      FROM mata_pelajaran mp
-      LEFT JOIN mata_pelajaran_kelas mpk ON mp.id = mpk.mata_pelajaran_id
-      LEFT JOIN kelas k ON mpk.kelas_id = k.id
-      GROUP BY mp.id
-      ORDER BY mp.nama
-    `);
+        SELECT 
+          mp.*,
+          GROUP_CONCAT(DISTINCT k.nama) as kelas_names,
+          GROUP_CONCAT(DISTINCT k.id) as kelas_ids,
+          COUNT(DISTINCT k.id) as jumlah_kelas
+        FROM mata_pelajaran mp
+        LEFT JOIN mata_pelajaran_kelas mpk ON mp.id = mpk.mata_pelajaran_id
+        LEFT JOIN kelas k ON mpk.kelas_id = k.id AND k.sekolah_id = ?
+        WHERE mp.sekolah_id = ?
+        GROUP BY mp.id
+        ORDER BY mp.nama
+      `, [req.sekolah_id, req.sekolah_id]);
 
       await connection.end();
 
@@ -4514,7 +5528,7 @@ app.get(
 );
 
 // Get Kelas by Mata Pelajaran
-app.get("/api/kelas-by-mata-pelajaran", authenticateToken, async (req, res) => {
+app.get("/api/kelas-by-mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { mata_pelajaran_id } = req.query;
     console.log("Mengambil kelas untuk mata pelajaran:", mata_pelajaran_id);
@@ -4527,13 +5541,24 @@ app.get("/api/kelas-by-mata-pelajaran", authenticateToken, async (req, res) => {
 
     const connection = await getConnection();
 
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
     const [kelas] = await connection.execute(
       `SELECT k.* 
        FROM kelas k
        JOIN mata_pelajaran_kelas mpk ON k.id = mpk.kelas_id
-       WHERE mpk.mata_pelajaran_id = ?
+       WHERE mpk.mata_pelajaran_id = ? AND k.sekolah_id = ?
        ORDER BY k.nama`,
-      [mata_pelajaran_id]
+      [mata_pelajaran_id, req.sekolah_id]  // Tambahkan sekolah_id
     );
 
     await connection.end();
@@ -4547,7 +5572,7 @@ app.get("/api/kelas-by-mata-pelajaran", authenticateToken, async (req, res) => {
 });
 
 // Add Kelas to Mata Pelajaran
-app.post("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
+app.post("/api/mata-pelajaran-kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { mata_pelajaran_id, kelas_id } = req.body;
     console.log("Menambah kelas ke mata pelajaran:", {
@@ -4563,6 +5588,28 @@ app.post("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
 
     const id = crypto.randomUUID();
     const connection = await getConnection();
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [kelasCheck] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [kelas_id, req.sekolah_id]
+    );
+
+    if (kelasCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Check if relationship already exists
     const [existing] = await connection.execute(
@@ -4595,7 +5642,7 @@ app.post("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
 });
 
 // Remove Kelas from Mata Pelajaran
-app.delete("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
+app.delete("/api/mata-pelajaran-kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { mata_pelajaran_id, kelas_id } = req.query;
     console.log("Menghapus kelas dari mata pelajaran:", {
@@ -4610,6 +5657,28 @@ app.delete("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
     }
 
     const connection = await getConnection();
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [kelasCheck] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [kelas_id, req.sekolah_id]
+    );
+
+    if (kelasCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
 
     await connection.execute(
       "DELETE FROM mata_pelajaran_kelas WHERE mata_pelajaran_id = ? AND kelas_id = ?",
@@ -4631,7 +5700,7 @@ app.delete("/api/mata-pelajaran-kelas", authenticateToken, async (req, res) => {
 // Add mata pelajaran to guru
 app.post(
   "/api/guru/:id/mata-pelajaran",
-  authenticateToken,
+  authenticateTokenAndSchool,
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -4640,6 +5709,28 @@ app.post(
       console.log("Menambah mata pelajaran ke guru:", id, mata_pelajaran_id);
 
       const connection = await getConnection();
+
+      // Cek apakah guru termasuk dalam sekolah yang sama
+      const [guruCheck] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+        [id, req.sekolah_id]
+      );
+
+      if (guruCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+      }
+
+      // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+      const [mapelCheck] = await connection.execute(
+        "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+        [mata_pelajaran_id, req.sekolah_id]
+      );
+
+      if (mapelCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+      }
 
       // Check if relationship already exists
       const [existing] = await connection.execute(
@@ -4675,19 +5766,30 @@ app.post(
 );
 
 // Get mata pelajaran by guru
-app.get("/api/guru/:id/mata-pelajaran", authenticateToken, async (req, res) => {
+app.get("/api/guru/:id/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Mengambil mata pelajaran untuk guru:", id);
 
     const connection = await getConnection();
 
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
+
     const [mataPelajaran] = await connection.execute(
       `SELECT mp.* 
        FROM mata_pelajaran mp
        JOIN guru_mata_pelajaran gmp ON mp.id = gmp.mata_pelajaran_id
-       WHERE gmp.guru_id = ?`,
-      [id]
+       WHERE gmp.guru_id = ? AND mp.sekolah_id = ?`,
+      [id, req.sekolah_id]
     );
 
     await connection.end();
@@ -4703,7 +5805,7 @@ app.get("/api/guru/:id/mata-pelajaran", authenticateToken, async (req, res) => {
 // Remove mata pelajaran from guru
 app.delete(
   "/api/guru/:guruId/mata-pelajaran/:mataPelajaranId",
-  authenticateToken,
+  authenticateTokenAndSchool,
   async (req, res) => {
     try {
       const { guruId, mataPelajaranId } = req.params;
@@ -4714,6 +5816,28 @@ app.delete(
       );
 
       const connection = await getConnection();
+
+      // Cek apakah guru termasuk dalam sekolah yang sama
+      const [guruCheck] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+        [guruId, req.sekolah_id]
+      );
+
+      if (guruCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+      }
+
+      // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+      const [mapelCheck] = await connection.execute(
+        "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+        [mataPelajaranId, req.sekolah_id]
+      );
+
+      if (mapelCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+      }
 
       await connection.execute(
         "DELETE FROM guru_mata_pelajaran WHERE guru_id = ? AND mata_pelajaran_id = ?",
@@ -4734,9 +5858,9 @@ app.delete(
 );
 
 // Kelola Guru - Get all teachers with their subjects
-app.get("/api/guru-matapelajaran", authenticateToken, async (req, res) => {
+app.get("/api/guru-matapelajaran", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data guru");
+    console.log("Mengambil data guru untuk sekolah:", req.sekolah_id);
     const connection = await getConnection();
 
     const [guru] = await connection.execute(`
@@ -4747,12 +5871,12 @@ app.get("/api/guru-matapelajaran", authenticateToken, async (req, res) => {
         GROUP_CONCAT(DISTINCT mp.nama) as mata_pelajaran_names,
         GROUP_CONCAT(DISTINCT mp.id) as mata_pelajaran_ids
       FROM users u 
-      LEFT JOIN kelas k ON u.kelas_id = k.id 
+      LEFT JOIN kelas k ON u.kelas_id = k.id AND k.sekolah_id = ?
       LEFT JOIN guru_mata_pelajaran gmp ON u.id = gmp.guru_id
-      LEFT JOIN mata_pelajaran mp ON gmp.mata_pelajaran_id = mp.id
-      WHERE u.role = 'guru'
+      LEFT JOIN mata_pelajaran mp ON gmp.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      WHERE u.role = 'guru' AND u.sekolah_id = ?
       GROUP BY u.id
-    `);
+    `, [req.sekolah_id, req.sekolah_id, req.sekolah_id]);
 
     await connection.end();
 
@@ -4842,10 +5966,10 @@ app.post("/api/jam-pelajaran", authenticateToken, async (req, res) => {
 });
 
 // Update Get Jadwal Mengajar untuk menggunakan struktur baru
-app.get("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
+app.get("/api/jadwal-mengajar", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { guru_id, kelas_id, hari_id, semester_id, tahun_ajaran } = req.query;
-    console.log("Mengambil data jadwal mengajar");
+    console.log("Mengambil data jadwal mengajar untuk sekolah:", req.sekolah_id);
 
     let query = `
       SELECT jm.*, 
@@ -4858,15 +5982,15 @@ app.get("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
         jp.jam_mulai,
         jp.jam_selesai
       FROM jadwal_mengajar jm
-      JOIN users u ON jm.guru_id = u.id
-      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
-      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN users u ON jm.guru_id = u.id AND u.sekolah_id = ?
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      JOIN kelas k ON jm.kelas_id = k.id AND k.sekolah_id = ?
       JOIN hari h ON jm.hari_id = h.id
       JOIN semester s ON jm.semester_id = s.id
       JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
-      WHERE 1=1
+      WHERE 1=1 AND jm.sekolah_id = ?
     `;
-    let params = [];
+    let params = [req.sekolah_id, req.sekolah_id, req.sekolah_id, req.sekolah_id];
 
     if (guru_id) {
       query += " AND jm.guru_id = ?";
@@ -5685,7 +6809,7 @@ app.post(
 );
 
 // Update Create Jadwal Mengajar dengan validasi bentrokan
-app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
+app.post("/api/jadwal-mengajar", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah jadwal mengajar baru:", req.body);
     const {
@@ -5699,8 +6823,40 @@ app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
     } = req.body;
 
     const id = crypto.randomUUID();
-
     const connection = await getConnection();
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guru_id, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [kelasCheck] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [kelas_id, req.sekolah_id]
+    );
+
+    if (kelasCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Cek konflik jadwal - guru, hari, semester, jam_pelajaran yang sama
     const [konflikGuru] = await connection.execute(
@@ -5708,8 +6864,8 @@ app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
        FROM jadwal_mengajar jm
        JOIN users u ON jm.guru_id = u.id
        JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
-       WHERE jm.guru_id = ? AND jm.hari_id = ? AND jm.semester_id = ? AND jm.tahun_ajaran = ? AND jm.jam_pelajaran_id = ?`,
-      [guru_id, hari_id, semester_id, tahun_ajaran, jam_pelajaran_id]
+       WHERE jm.guru_id = ? AND jm.hari_id = ? AND jm.semester_id = ? AND jm.tahun_ajaran = ? AND jm.jam_pelajaran_id = ? AND jm.sekolah_id = ?`,
+      [guru_id, hari_id, semester_id, tahun_ajaran, jam_pelajaran_id, req.sekolah_id]
     );
 
     if (konflikGuru.length > 0) {
@@ -5737,7 +6893,7 @@ app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
     }
 
     await connection.execute(
-      "INSERT INTO jadwal_mengajar (id, guru_id, mata_pelajaran_id, kelas_id, hari_id, jam_pelajaran_id, semester_id, tahun_ajaran) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO jadwal_mengajar (id, guru_id, mata_pelajaran_id, kelas_id, hari_id, jam_pelajaran_id, semester_id, tahun_ajaran, sekolah_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         guru_id,
@@ -5747,6 +6903,7 @@ app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
         jam_pelajaran_id,
         semester_id,
         tahun_ajaran,
+        req.sekolah_id  // Tambahkan sekolah_id
       ]
     );
 
@@ -5762,7 +6919,7 @@ app.post("/api/jadwal-mengajar", authenticateToken, async (req, res) => {
 });
 
 // Update Jadwal Mengajar dengan validasi bentrokan
-app.put("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
+app.put("/api/jadwal-mengajar/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Update jadwal mengajar:", id, req.body);
@@ -5777,6 +6934,50 @@ app.put("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
     } = req.body;
 
     const connection = await getConnection();
+
+    // Cek apakah jadwal termasuk dalam sekolah yang sama
+    const [jadwalCheck] = await connection.execute(
+      "SELECT id FROM jadwal_mengajar WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (jadwalCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Jadwal mengajar tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guru_id, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [kelasCheck] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [kelas_id, req.sekolah_id]
+    );
+
+    if (kelasCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Cek konflik jadwal - guru (kecuali dengan dirinya sendiri)
     const [konflikGuru] = await connection.execute(
@@ -5813,7 +7014,7 @@ app.put("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
     }
 
     await connection.execute(
-      "UPDATE jadwal_mengajar SET guru_id = ?, mata_pelajaran_id = ?, kelas_id = ?, hari_id = ?, jam_pelajaran_id = ?, semester_id = ?, tahun_ajaran = ? WHERE id = ?",
+      "UPDATE jadwal_mengajar SET guru_id = ?, mata_pelajaran_id = ?, kelas_id = ?, hari_id = ?, jam_pelajaran_id = ?, semester_id = ?, tahun_ajaran = ? WHERE id = ? AND sekolah_id = ?",
       [
         guru_id,
         mata_pelajaran_id,
@@ -5823,6 +7024,7 @@ app.put("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
         semester_id,
         tahun_ajaran,
         id,
+        req.sekolah_id  // Tambahkan sekolah_id di WHERE
       ]
     );
 
@@ -5838,13 +7040,28 @@ app.put("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
 });
 
 // Delete Jadwal Mengajar
-app.delete("/api/jadwal-mengajar/:id", authenticateToken, async (req, res) => {
+app.delete("/api/jadwal-mengajar/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Delete jadwal mengajar:", id);
 
     const connection = await getConnection();
-    await connection.execute("DELETE FROM jadwal_mengajar WHERE id = ?", [id]);
+
+    // Cek apakah jadwal termasuk dalam sekolah yang sama
+    const [jadwalCheck] = await connection.execute(
+      "SELECT id FROM jadwal_mengajar WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (jadwalCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Jadwal mengajar tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    await connection.execute(
+      "DELETE FROM jadwal_mengajar WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
     await connection.end();
 
     console.log("Jadwal mengajar berhasil dihapus:", id);
@@ -5934,13 +7151,26 @@ app.get(
 // Get Jadwal Mengajar by Guru ID
 app.get(
   "/api/jadwal-mengajar/guru/:guruId",
-  authenticateToken,
+  authenticateTokenAndSchool,
   async (req, res) => {
     try {
       const { guruId } = req.params;
       const { semester_id, tahun_ajaran, hari_id } = req.query;
 
       console.log("Mengambil jadwal mengajar untuk guru:", guruId);
+
+      // Cek apakah guru termasuk dalam sekolah yang sama
+      const connection = await getConnection();
+      
+      const [guruCheck] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+        [guruId, req.sekolah_id]
+      );
+
+      if (guruCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+      }
 
       let query = `
       SELECT jm.*, 
@@ -5955,15 +7185,15 @@ app.get(
         jp.jam_selesai
       FROM jadwal_mengajar jm
       JOIN users u ON jm.guru_id = u.id
-      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
-      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      JOIN kelas k ON jm.kelas_id = k.id AND k.sekolah_id = ?
       JOIN hari h ON jm.hari_id = h.id
       JOIN semester s ON jm.semester_id = s.id
       JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
-      WHERE jm.guru_id = ?
+      WHERE jm.guru_id = ? AND jm.sekolah_id = ?
     `;
 
-      let params = [guruId];
+      let params = [req.sekolah_id, req.sekolah_id, guruId, req.sekolah_id];
 
       if (semester_id) {
         query += " AND jm.semester_id = ?";
@@ -5982,7 +7212,6 @@ app.get(
 
       query += " ORDER BY h.urutan, jp.jam_ke";
 
-      const connection = await getConnection();
       const [jadwal] = await connection.execute(query, params);
       await connection.end();
 
@@ -6039,7 +7268,7 @@ app.get(
 );
 
 // PERBAIKAN: Endpoint current dengan filter yang benar
-app.get("/api/jadwal-mengajar/current", authenticateToken, async (req, res) => {
+app.get("/api/jadwal-mengajar/current", authenticateTokenAndSchool, async (req, res) => {
   try {
     const userId = req.user.id;
     const { semester_id, tahun_ajaran, hari_id } = req.query;
@@ -6064,19 +7293,18 @@ app.get("/api/jadwal-mengajar/current", authenticateToken, async (req, res) => {
         jp.jam_selesai
       FROM jadwal_mengajar jm
       JOIN users u ON jm.guru_id = u.id
-      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
-      JOIN kelas k ON jm.kelas_id = k.id
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      JOIN kelas k ON jm.kelas_id = k.id AND k.sekolah_id = ?
       JOIN hari h ON jm.hari_id = h.id
       JOIN semester s ON jm.semester_id = s.id
       JOIN jam_pelajaran jp ON jm.jam_pelajaran_id = jp.id
-      WHERE jm.guru_id = ?
+      WHERE jm.guru_id = ? AND jm.sekolah_id = ?
     `;
 
-    let params = [userId];
+    let params = [req.sekolah_id, req.sekolah_id, userId, req.sekolah_id];
 
-    // PERBAIKAN: Filter semester - handle berbagai format
+    // Filter semester
     if (semester_id) {
-      // Handle jika semester_id adalah angka (1,2) atau string (ganjil, genap)
       if (semester_id === "1" || semester_id === "2") {
         query += " AND jm.semester_id = ?";
         params.push(semester_id);
@@ -6092,20 +7320,16 @@ app.get("/api/jadwal-mengajar/current", authenticateToken, async (req, res) => {
       }
     }
 
-    // PERBAIKAN: Filter tahun ajaran
     if (tahun_ajaran) {
       query += " AND jm.tahun_ajaran = ?";
       params.push(tahun_ajaran);
     }
 
-    // PERBAIKAN: Filter hari - handle berbagai format
     if (hari_id) {
-      // Handle jika hari_id adalah angka (1,2,3...) atau nama hari
       if (!isNaN(hari_id)) {
         query += " AND jm.hari_id = ?";
         params.push(hari_id);
       } else {
-        // Jika nama hari, cari di tabel hari
         query += " AND (h.nama = ? OR h.id = ?)";
         params.push(hari_id, hari_id);
       }
@@ -6113,15 +7337,11 @@ app.get("/api/jadwal-mengajar/current", authenticateToken, async (req, res) => {
 
     query += " ORDER BY h.urutan, jp.jam_ke";
 
-    console.log("Executing query:", query);
-    console.log("With params:", params);
-
     const connection = await getConnection();
     const [jadwal] = await connection.execute(query, params);
     await connection.end();
 
     console.log("Jadwal ditemukan setelah filter:", jadwal.length);
-
     res.json(jadwal);
   } catch (error) {
     console.error("ERROR GET JADWAL MENGAJAR CURRENT:", error.message);
@@ -6211,10 +7431,10 @@ app.get(
 );
 
 // Get RPP dengan detail lengkap
-app.get("/api/rpp", authenticateToken, async (req, res) => {
+app.get("/api/rpp", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { guru_id, status } = req.query;
-    console.log("Mengambil data RPP");
+    console.log("Mengambil data RPP untuk sekolah:", req.sekolah_id);
 
     let query = `
       SELECT r.*, 
@@ -6222,12 +7442,12 @@ app.get("/api/rpp", authenticateToken, async (req, res) => {
         u.nama as guru_nama,
         k.nama as kelas_nama
       FROM rpp r
-      JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id
-      JOIN users u ON r.guru_id = u.id
-      LEFT JOIN kelas k ON r.kelas_id = k.id
-      WHERE 1=1
+      JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      JOIN users u ON r.guru_id = u.id AND u.sekolah_id = ?
+      LEFT JOIN kelas k ON r.kelas_id = k.id AND k.sekolah_id = ?
+      WHERE r.sekolah_id = ?
     `;
-    let params = [];
+    let params = [req.sekolah_id, req.sekolah_id, req.sekolah_id, req.sekolah_id];
 
     if (guru_id) {
       query += " AND r.guru_id = ?";
@@ -6253,72 +7473,86 @@ app.get("/api/rpp", authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/api/export-rpp', async (req, res) => {
+app.post("/api/export-rpp", async (req, res) => {
   try {
     const { rppList } = req.body;
 
     if (!rppList || !Array.isArray(rppList)) {
       return res.status(400).json({
         success: false,
-        message: 'Data RPP tidak valid'
+        message: "Data RPP tidak valid",
       });
     }
 
     // Create new workbook
     const workbook = XLSX.utils.book_new();
-    
+
     // Prepare data for Excel
     const excelData = [
       // Header row
       [
-        'Judul RPP', 'Guru Pengajar', 'Mata Pelajaran', 'Kelas', 'Semester', 
-        'Tahun Ajaran', 'Status', 'Tanggal Dibuat', 'Catatan Admin', 
-        'Kompetensi Dasar', 'Tujuan Pembelajaran', 'Materi Pembelajaran', 
-        'Metode Pembelajaran', 'Media Pembelajaran', 'Sumber Belajar', 
-        'Langkah Pembelajaran', 'Penilaian'
+        "Judul RPP",
+        "Guru Pengajar",
+        "Mata Pelajaran",
+        "Kelas",
+        "Semester",
+        "Tahun Ajaran",
+        "Status",
+        "Tanggal Dibuat",
+        "Catatan Admin",
+        "Kompetensi Dasar",
+        "Tujuan Pembelajaran",
+        "Materi Pembelajaran",
+        "Metode Pembelajaran",
+        "Media Pembelajaran",
+        "Sumber Belajar",
+        "Langkah Pembelajaran",
+        "Penilaian",
       ],
       // Data rows
-      ...rppList.map(rpp => [
-        rpp.judul || '',
-        rpp.guru_nama || '',
-        rpp.mata_pelajaran_nama || '',
-        rpp.kelas_nama || '',
-        rpp.semester || '',
-        rpp.tahun_ajaran || '',
+      ...rppList.map((rpp) => [
+        rpp.judul || "",
+        rpp.guru_nama || "",
+        rpp.mata_pelajaran_nama || "",
+        rpp.kelas_nama || "",
+        rpp.semester || "",
+        rpp.tahun_ajaran || "",
         getStatusText(rpp.status),
         formatDateForExport(rpp.created_at),
-        rpp.catatan_admin || '',
-        rpp.kompetensi_dasar || '',
-        rpp.tujuan_pembelajaran || '',
-        rpp.materi_pembelajaran || '',
-        rpp.metode_pembelajaran || '',
-        rpp.media_pembelajaran || '',
-        rpp.sumber_belajar || '',
-        rpp.langkah_pembelajaran || '',
-        rpp.penilaian || ''
-      ])
+        rpp.catatan_admin || "",
+        rpp.kompetensi_dasar || "",
+        rpp.tujuan_pembelajaran || "",
+        rpp.materi_pembelajaran || "",
+        rpp.metode_pembelajaran || "",
+        rpp.media_pembelajaran || "",
+        rpp.sumber_belajar || "",
+        rpp.langkah_pembelajaran || "",
+        rpp.penilaian || "",
+      ]),
     ];
 
     // Create worksheet
     const worksheet = XLSX.utils.aoa_to_sheet(excelData);
 
     // Set column widths for better readability
-    if (!worksheet['!cols']) worksheet['!cols'] = [];
-    const columnWidths = [20, 15, 20, 10, 10, 12, 10, 12, 15, 25, 25, 25, 20, 20, 20, 30, 25];
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    const columnWidths = [
+      20, 15, 20, 10, 10, 12, 10, 12, 15, 25, 25, 25, 20, 20, 20, 30, 25,
+    ];
     for (let i = 0; i < columnWidths.length; i++) {
-      worksheet['!cols'][i] = { width: columnWidths[i] };
+      worksheet["!cols"][i] = { width: columnWidths[i] };
     }
 
     // Add worksheet to workbook
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data RPP');
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data RPP");
 
     // Generate filename
     const filename = `Data_RPP_${Date.now()}.xlsx`;
-    const filePath = path.join(__dirname, '../temp', filename);
+    const filePath = path.join(__dirname, "../temp", filename);
 
     // Ensure temp directory exists
-    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
-      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
     }
 
     // Write file
@@ -6327,10 +7561,10 @@ app.post('/api/export-rpp', async (req, res) => {
     // Send file as response
     res.download(filePath, filename, (err) => {
       if (err) {
-        console.error('Error downloading file:', err);
+        console.error("Error downloading file:", err);
         res.status(500).json({
           success: false,
-          message: 'Gagal mengunduh file'
+          message: "Gagal mengunduh file",
         });
       }
 
@@ -6341,133 +7575,24 @@ app.post('/api/export-rpp', async (req, res) => {
         }
       }, 5000);
     });
-
   } catch (error) {
-    console.error('Export RPP error:', error);
+    console.error("Export RPP error:", error);
     res.status(500).json({
       success: false,
-      message: `Gagal mengexport data RPP: ${error.message}`
-    });
-  }
-});
-
-// Download template RPP Excel
-app.get('/api/download-rpp-template', async (req, res) => {
-  try {
-    // Create new workbook
-    const workbook = XLSX.utils.book_new();
-    
-    // Prepare template data
-    const templateData = [
-      // Header row
-      [
-        'Judul RPP*', 'Mata Pelajaran ID*', 'Kelas ID*', 'Semester*', 
-        'Tahun Ajaran*', 'Kompetensi Dasar*', 'Tujuan Pembelajaran*', 
-        'Materi Pembelajaran*', 'Metode Pembelajaran', 'Media Pembelajaran', 
-        'Sumber Belajar', 'Langkah Pembelajaran*', 'Penilaian*'
-      ],
-      // Example data
-      [
-        'RPP Matematika Kelas 10 - Aljabar',
-        '1',
-        '5',
-        'Ganjil',
-        '2024/2025',
-        'Memahami konsep aljabar dasar',
-        'Siswa dapat menyelesaikan persamaan linear',
-        'Konsep variabel, koefisien, dan konstanta',
-        'Ceramah, diskusi, latihan',
-        'Papan tulis, proyektor',
-        'Buku paket matematika kelas 10',
-        'Pendahuluan, kegiatan inti, penutup',
-        'Tes tertulis, observasi'
-      ],
-      // Second example
-      [
-        'RPP Bahasa Indonesia Kelas 8 - Cerpen',
-        '2',
-        '3',
-        'Genap',
-        '2024/2025',
-        'Menganalisis unsur intrinsik cerpen',
-        'Siswa dapat mengidentifikasi tokoh, latar, dan alur cerita',
-        'Unsur intrinsik cerpen: tokoh, latar, alur, tema',
-        'Diskusi kelompok, presentasi',
-        'Teks cerpen, LCD proyektor',
-        'Buku kumpulan cerpen, LKS',
-        'Pembukaan, eksplorasi, elaborasi, konfirmasi',
-        'Penilaian proses, hasil karya, presentasi'
-      ],
-      // Empty row
-      [],
-      // Notes
-      ['* Wajib diisi'],
-      ['Format Semester: Ganjil / Genap'],
-      ['Format Tahun Ajaran: YYYY/YYYY (contoh: 2024/2025)'],
-      ['Mata Pelajaran ID dan Kelas ID harus sesuai dengan ID di sistem']
-    ];
-
-    // Create worksheet
-    const worksheet = XLSX.utils.aoa_to_sheet(templateData);
-
-    // Set column widths for template
-    if (!worksheet['!cols']) worksheet['!cols'] = [];
-    const templateWidths = [25, 18, 12, 10, 15, 25, 25, 25, 20, 20, 20, 25, 20];
-    for (let i = 0; i < templateWidths.length; i++) {
-      worksheet['!cols'][i] = { width: templateWidths[i] };
-    }
-
-    // Add worksheet to workbook
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Template RPP');
-
-    // Generate filename
-    const filename = 'Template_RPP.xlsx';
-    const filePath = path.join(__dirname, '../temp', filename);
-
-    // Ensure temp directory exists
-    if (!fs.existsSync(path.join(__dirname, '../temp'))) {
-      fs.mkdirSync(path.join(__dirname, '../temp'), { recursive: true });
-    }
-
-    // Write file
-    XLSX.writeFile(workbook, filePath);
-
-    // Send file as response
-    res.download(filePath, filename, (err) => {
-      if (err) {
-        console.error('Error downloading template:', err);
-        res.status(500).json({
-          success: false,
-          message: 'Gagal mengunduh template'
-        });
-      }
-
-      // Clean up temporary file after download
-      setTimeout(() => {
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-      }, 5000);
-    });
-
-  } catch (error) {
-    console.error('RPP template download error:', error);
-    res.status(500).json({
-      success: false,
-      message: `Gagal mengunduh template RPP: ${error.message}`
+      message: `Gagal mengexport data RPP: ${error.message}`,
     });
   }
 });
 
 // Validasi data RPP sebelum import
-app.post('/api/validate-rpp', async (req, res) => {
+app.post("/api/validate-rpp", async (req, res) => {
   try {
     const { rppData } = req.body;
 
     if (!rppData || !Array.isArray(rppData)) {
       return res.status(400).json({
         success: false,
-        message: 'Data RPP tidak valid'
+        message: "Data RPP tidak valid",
       });
     }
 
@@ -6480,7 +7605,7 @@ app.post('/api/validate-rpp', async (req, res) => {
       let hasError = false;
 
       // Validasi field required
-      if (!rpp.judul || rpp.judul.toString().trim() === '') {
+      if (!rpp.judul || rpp.judul.toString().trim() === "") {
         errors.push(`Baris ${i + 1}: Judul RPP tidak boleh kosong`);
         hasError = true;
       } else {
@@ -6501,7 +7626,7 @@ app.post('/api/validate-rpp', async (req, res) => {
         validatedRpp.kelas_id = parseInt(rpp.kelas_id);
       }
 
-      if (!rpp.semester || !['Ganjil', 'Genap'].includes(rpp.semester)) {
+      if (!rpp.semester || !["Ganjil", "Genap"].includes(rpp.semester)) {
         errors.push(`Baris ${i + 1}: Semester harus "Ganjil" atau "Genap"`);
         hasError = true;
       } else {
@@ -6509,41 +7634,61 @@ app.post('/api/validate-rpp', async (req, res) => {
       }
 
       if (!rpp.tahun_ajaran || !isValidTahunAjaran(rpp.tahun_ajaran)) {
-        errors.push(`Baris ${i + 1}: Format tahun ajaran tidak valid (contoh: 2024/2025)`);
+        errors.push(
+          `Baris ${i + 1}: Format tahun ajaran tidak valid (contoh: 2024/2025)`
+        );
         hasError = true;
       } else {
         validatedRpp.tahun_ajaran = rpp.tahun_ajaran;
       }
 
-      if (!rpp.kompetensi_dasar || rpp.kompetensi_dasar.toString().trim() === '') {
+      if (
+        !rpp.kompetensi_dasar ||
+        rpp.kompetensi_dasar.toString().trim() === ""
+      ) {
         errors.push(`Baris ${i + 1}: Kompetensi dasar tidak boleh kosong`);
         hasError = true;
       } else {
         validatedRpp.kompetensi_dasar = rpp.kompetensi_dasar.toString().trim();
       }
 
-      if (!rpp.tujuan_pembelajaran || rpp.tujuan_pembelajaran.toString().trim() === '') {
+      if (
+        !rpp.tujuan_pembelajaran ||
+        rpp.tujuan_pembelajaran.toString().trim() === ""
+      ) {
         errors.push(`Baris ${i + 1}: Tujuan pembelajaran tidak boleh kosong`);
         hasError = true;
       } else {
-        validatedRpp.tujuan_pembelajaran = rpp.tujuan_pembelajaran.toString().trim();
+        validatedRpp.tujuan_pembelajaran = rpp.tujuan_pembelajaran
+          .toString()
+          .trim();
       }
 
-      if (!rpp.materi_pembelajaran || rpp.materi_pembelajaran.toString().trim() === '') {
+      if (
+        !rpp.materi_pembelajaran ||
+        rpp.materi_pembelajaran.toString().trim() === ""
+      ) {
         errors.push(`Baris ${i + 1}: Materi pembelajaran tidak boleh kosong`);
         hasError = true;
       } else {
-        validatedRpp.materi_pembelajaran = rpp.materi_pembelajaran.toString().trim();
+        validatedRpp.materi_pembelajaran = rpp.materi_pembelajaran
+          .toString()
+          .trim();
       }
 
-      if (!rpp.langkah_pembelajaran || rpp.langkah_pembelajaran.toString().trim() === '') {
+      if (
+        !rpp.langkah_pembelajaran ||
+        rpp.langkah_pembelajaran.toString().trim() === ""
+      ) {
         errors.push(`Baris ${i + 1}: Langkah pembelajaran tidak boleh kosong`);
         hasError = true;
       } else {
-        validatedRpp.langkah_pembelajaran = rpp.langkah_pembelajaran.toString().trim();
+        validatedRpp.langkah_pembelajaran = rpp.langkah_pembelajaran
+          .toString()
+          .trim();
       }
 
-      if (!rpp.penilaian || rpp.penilaian.toString().trim() === '') {
+      if (!rpp.penilaian || rpp.penilaian.toString().trim() === "") {
         errors.push(`Baris ${i + 1}: Penilaian tidak boleh kosong`);
         hasError = true;
       } else {
@@ -6551,9 +7696,9 @@ app.post('/api/validate-rpp', async (req, res) => {
       }
 
       // Field optional
-      validatedRpp.metode_pembelajaran = rpp.metode_pembelajaran || '';
-      validatedRpp.media_pembelajaran = rpp.media_pembelajaran || '';
-      validatedRpp.sumber_belajar = rpp.sumber_belajar || '';
+      validatedRpp.metode_pembelajaran = rpp.metode_pembelajaran || "";
+      validatedRpp.media_pembelajaran = rpp.media_pembelajaran || "";
+      validatedRpp.sumber_belajar = rpp.sumber_belajar || "";
 
       if (!hasError) {
         validatedData.push(validatedRpp);
@@ -6563,23 +7708,22 @@ app.post('/api/validate-rpp', async (req, res) => {
     if (errors.length > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Validasi data RPP gagal',
+        message: "Validasi data RPP gagal",
         errors: errors,
-        validatedData: validatedData
+        validatedData: validatedData,
       });
     }
 
     res.json({
       success: true,
-      message: 'Validasi data RPP berhasil',
-      validatedData: validatedData
+      message: "Validasi data RPP berhasil",
+      validatedData: validatedData,
     });
-
   } catch (error) {
-    console.error('RPP validation error:', error);
+    console.error("RPP validation error:", error);
     res.status(500).json({
       success: false,
-      message: `Gagal validasi data RPP: ${error.message}`
+      message: `Gagal validasi data RPP: ${error.message}`,
     });
   }
 });
@@ -6587,22 +7731,22 @@ app.post('/api/validate-rpp', async (req, res) => {
 // Helper functions
 function getStatusText(status) {
   switch (status) {
-    case 'Disetujui':
-      return 'Approved';
-    case 'Menunggu':
-      return 'Pending';
-    case 'Ditolak':
-      return 'Rejected';
+    case "Disetujui":
+      return "Approved";
+    case "Menunggu":
+      return "Pending";
+    case "Ditolak":
+      return "Rejected";
     default:
-      return status || '-';
+      return status || "-";
   }
 }
 
 function formatDateForExport(date) {
-  if (!date) return '';
+  if (!date) return "";
   try {
     const parsed = new Date(date);
-    return parsed.toISOString().split('T')[0];
+    return parsed.toISOString().split("T")[0];
   } catch (e) {
     return date;
   }
@@ -6611,13 +7755,13 @@ function formatDateForExport(date) {
 function isValidTahunAjaran(tahunAjaran) {
   const pattern = /^\d{4}\/\d{4}$/;
   if (!pattern.test(tahunAjaran)) return false;
-  
-  const [start, end] = tahunAjaran.split('/');
+
+  const [start, end] = tahunAjaran.split("/");
   return parseInt(end) - parseInt(start) === 1;
 }
 
 // Create RPP dengan handling undefined values
-app.post("/api/rpp", authenticateToken, async (req, res) => {
+app.post("/api/rpp", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah RPP:", req.body);
     const {
@@ -6666,6 +7810,41 @@ app.post("/api/rpp", authenticateToken, async (req, res) => {
 
     const connection = await getConnection();
 
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guru_id, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama (jika ada kelas_id)
+    if (kelas_id) {
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelas_id, req.sekolah_id]
+      );
+
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
     // Handle undefined values by converting them to null
     const cleanKelasId = kelas_id || null;
     const cleanKompetensiInti = kompetensi_inti || null;
@@ -6685,8 +7864,8 @@ app.post("/api/rpp", authenticateToken, async (req, res) => {
         id, guru_id, mata_pelajaran_id, kelas_id, judul, semester, tahun_ajaran,
         kompetensi_inti, kompetensi_dasar, indikator, tujuan_pembelajaran,
         materi_pokok, metode_pembelajaran, media_alat, sumber_belajar,
-        kegiatan_pembelajaran, penilaian, file_path, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        kegiatan_pembelajaran, penilaian, file_path, status, created_at, sekolah_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         guru_id,
@@ -6708,6 +7887,7 @@ app.post("/api/rpp", authenticateToken, async (req, res) => {
         cleanFilePath,
         status,
         createdAt,
+        req.sekolah_id  // Tambahkan sekolah_id
       ]
     );
     await connection.end();
@@ -6722,7 +7902,7 @@ app.post("/api/rpp", authenticateToken, async (req, res) => {
 });
 
 // Update status RPP (untuk admin)
-app.put("/api/rpp/:id/status", authenticateToken, async (req, res) => {
+app.put("/api/rpp/:id/status", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, catatan } = req.body;
@@ -6730,9 +7910,21 @@ app.put("/api/rpp/:id/status", authenticateToken, async (req, res) => {
     console.log("Update status RPP:", id, status);
 
     const connection = await getConnection();
+
+    // Cek apakah RPP termasuk dalam sekolah yang sama
+    const [rppCheck] = await connection.execute(
+      "SELECT id FROM rpp WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (rppCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "RPP tidak ditemukan atau tidak memiliki akses" });
+    }
+
     await connection.execute(
-      "UPDATE rpp SET status = ?, catatan_admin = ?, updated_at = NOW() WHERE id = ?",
-      [status, catatan || "", id]
+      "UPDATE rpp SET status = ?, catatan_admin = ?, updated_at = NOW() WHERE id = ? AND sekolah_id = ?",
+      [status, catatan || "", id, req.sekolah_id]  // Tambahkan sekolah_id di WHERE
     );
     await connection.end();
 
@@ -6745,13 +7937,28 @@ app.put("/api/rpp/:id/status", authenticateToken, async (req, res) => {
 });
 
 // Delete RPP
-app.delete("/api/rpp/:id", authenticateToken, async (req, res) => {
+app.delete("/api/rpp/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Delete RPP:", id);
 
     const connection = await getConnection();
-    await connection.execute("DELETE FROM rpp WHERE id = ?", [id]);
+
+    // Cek apakah RPP termasuk dalam sekolah yang sama
+    const [rppCheck] = await connection.execute(
+      "SELECT id FROM rpp WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (rppCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "RPP tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    await connection.execute(
+      "DELETE FROM rpp WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]  // Tambahkan sekolah_id di WHERE
+    );
     await connection.end();
 
     console.log("RPP berhasil dihapus:", id);
@@ -6807,12 +8014,23 @@ app.post(
 );
 
 // Get kegiatan by guru
-app.get("/api/kegiatan/guru/:guruId", authenticateToken, async (req, res) => {
+app.get("/api/kegiatan/guru/:guruId", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { guruId } = req.params;
-    console.log("Mengambil kegiatan untuk guru:", guruId);
+    console.log("Mengambil kegiatan untuk guru:", guruId, "sekolah:", req.sekolah_id);
 
     const connection = await getConnection();
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guruId, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
 
     const [kegiatan] = await connection.execute(
       `
@@ -6825,18 +8043,18 @@ app.get("/api/kegiatan/guru/:guruId", authenticateToken, async (req, res) => {
         sbm.judul_sub_bab,
         GROUP_CONCAT(DISTINCT s.nama) as siswa_target_names
       FROM kegiatan_kelas kk
-      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
-      JOIN kelas kls ON kk.kelas_id = kls.id
-      JOIN users u ON kk.guru_id = u.id
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      JOIN kelas kls ON kk.kelas_id = kls.id AND kls.sekolah_id = ?
+      JOIN users u ON kk.guru_id = u.id AND u.sekolah_id = ?
       LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
       LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
       LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id
-      LEFT JOIN siswa s ON kst.siswa_id = s.id
-      WHERE kk.guru_id = ?
+      LEFT JOIN siswa s ON kst.siswa_id = s.id AND s.sekolah_id = ?
+      WHERE kk.guru_id = ? AND kk.sekolah_id = ?
       GROUP BY kk.id
       ORDER BY kk.tanggal DESC, kk.created_at DESC
     `,
-      [guruId]
+      [req.sekolah_id, req.sekolah_id, req.sekolah_id, req.sekolah_id, guruId, req.sekolah_id]
     );
 
     await connection.end();
@@ -6849,15 +8067,162 @@ app.get("/api/kegiatan/guru/:guruId", authenticateToken, async (req, res) => {
   }
 });
 
+// Export kegiatan kelas ke Excel
+app.post(
+  "/api/export-class-activities",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { activities } = req.body;
+
+      if (!activities || !Array.isArray(activities)) {
+        return res.status(400).json({
+          success: false,
+          message: "Data kegiatan kelas tidak valid",
+        });
+      }
+
+      // Create new workbook
+      const workbook = XLSX.utils.book_new();
+
+      // Prepare data for Excel
+      const excelData = [
+        // Header row
+        [
+          "Judul Kegiatan",
+          "Mata Pelajaran",
+          "Kelas",
+          "Guru Pengajar",
+          "Jenis Kegiatan",
+          "Target Siswa",
+          "Deskripsi",
+          "Tanggal",
+          "Hari",
+          "Batas Waktu",
+          "Bab",
+          "Sub Bab",
+        ],
+        // Data rows
+        ...activities.map((activity) => [
+          activity.judul || "",
+          activity.mata_pelajaran_nama || "",
+          activity.kelas_nama || "",
+          activity.guru_nama || "",
+          getActivityTypeLabel(activity.jenis),
+          getTargetLabel(activity.target),
+          activity.deskripsi || "",
+          formatDateForExport(activity.tanggal),
+          activity.hari || "",
+          formatDateForExport(activity.batas_waktu),
+          activity.judul_bab || "",
+          activity.judul_sub_bab || "",
+        ]),
+      ];
+
+      // Create worksheet
+      const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+      // Set column widths for better readability
+      if (!worksheet["!cols"]) worksheet["!cols"] = [];
+      const columnWidths = [25, 20, 15, 20, 15, 15, 30, 12, 10, 12, 20, 20];
+      for (let i = 0; i < columnWidths.length; i++) {
+        worksheet["!cols"][i] = { width: columnWidths[i] };
+      }
+
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Data Kegiatan Kelas");
+
+      // Generate filename
+      const filename = `Data_Kegiatan_Kelas_${Date.now()}.xlsx`;
+      const filePath = path.join(__dirname, "../temp", filename);
+
+      // Ensure temp directory exists
+      if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+        fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+      }
+
+      // Write file
+      XLSX.writeFile(workbook, filePath);
+
+      // Send file as response
+      res.download(filePath, filename, (err) => {
+        if (err) {
+          console.error("Error downloading file:", err);
+          res.status(500).json({
+            success: false,
+            message: "Gagal mengunduh file",
+          });
+        }
+
+        // Clean up temporary file after download
+        setTimeout(() => {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+          }
+        }, 5000);
+      });
+    } catch (error) {
+      console.error("Export class activities error:", error);
+      res.status(500).json({
+        success: false,
+        message: `Gagal mengexport data kegiatan kelas: ${error.message}`,
+      });
+    }
+  }
+);
+
+// Helper function untuk jenis kegiatan
+function getActivityTypeLabel(jenis) {
+  switch (jenis) {
+    case "materi":
+      return "Materi";
+    case "tugas":
+      return "Tugas";
+    case "kuis":
+      return "Kuis";
+    case "ulangan":
+      return "Ulangan";
+    case "proyek":
+      return "Proyek";
+    case "praktikum":
+      return "Praktikum";
+    default:
+      return jenis || "-";
+  }
+}
+
+// Helper function untuk target siswa
+function getTargetLabel(target) {
+  switch (target) {
+    case "umum":
+      return "Semua Siswa";
+    case "khusus":
+      return "Siswa Tertentu";
+    default:
+      return target || "-";
+  }
+}
+
 // Get kegiatan by kelas (untuk siswa)
-app.get("/api/kegiatan/kelas/:kelasId", authenticateToken, async (req, res) => {
+app.get("/api/kegiatan/kelas/:kelasId", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { kelasId } = req.params;
     const { siswa_id } = req.query;
 
-    console.log("Mengambil kegiatan untuk kelas:", kelasId);
+    console.log("Mengambil kegiatan untuk kelas:", kelasId, "sekolah:", req.sekolah_id);
 
     const connection = await getConnection();
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [kelasCheck] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [kelasId, req.sekolah_id]
+    );
+
+    if (kelasCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
 
     let query = `
       SELECT 
@@ -6869,21 +8234,20 @@ app.get("/api/kegiatan/kelas/:kelasId", authenticateToken, async (req, res) => {
         sbm.judul_sub_bab,
         (kst.siswa_id IS NOT NULL) as untuk_siswa_ini
       FROM kegiatan_kelas kk
-      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
-      JOIN kelas kls ON kk.kelas_id = kls.id
-      JOIN users u ON kk.guru_id = u.id
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      JOIN kelas kls ON kk.kelas_id = kls.id AND kls.sekolah_id = ?
+      JOIN users u ON kk.guru_id = u.id AND u.sekolah_id = ?
       LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
       LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
       LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id AND kst.siswa_id = ?
-      WHERE kk.kelas_id = ? AND (kk.target = 'umum' OR kst.siswa_id = ?)
+      WHERE kk.kelas_id = ? AND kk.sekolah_id = ? AND (kk.target = 'umum' OR kst.siswa_id = ?)
       GROUP BY kk.id
       ORDER BY kk.tanggal DESC, kk.created_at DESC
     `;
 
     const [kegiatan] = await connection.execute(query, [
-      siswa_id,
-      kelasId,
-      siswa_id,
+      req.sekolah_id, req.sekolah_id, req.sekolah_id,
+      siswa_id, kelasId, req.sekolah_id, siswa_id
     ]);
 
     await connection.end();
@@ -6896,10 +8260,121 @@ app.get("/api/kegiatan/kelas/:kelasId", authenticateToken, async (req, res) => {
   }
 });
 
-// Get semua pengumuman
-app.get("/api/pengumuman", authenticateToken, async (req, res) => {
+app.get("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data pengumuman");
+    const { guru_id, kelas_id, mata_pelajaran_id, target, tanggal } = req.query;
+    console.log("Mengambil semua kegiatan untuk sekolah:", req.sekolah_id);
+
+    let query = `
+      SELECT 
+        kk.*,
+        mp.nama as mata_pelajaran_nama,
+        kls.nama as kelas_nama,
+        u.nama as guru_nama,
+        bm.judul_bab,
+        sbm.judul_sub_bab,
+        GROUP_CONCAT(DISTINCT s.nama) as siswa_target_names
+      FROM kegiatan_kelas kk
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+      JOIN kelas kls ON kk.kelas_id = kls.id AND kls.sekolah_id = ?
+      JOIN users u ON kk.guru_id = u.id AND u.sekolah_id = ?
+      LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
+      LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
+      LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id
+      LEFT JOIN siswa s ON kst.siswa_id = s.id AND s.sekolah_id = ?
+      WHERE kk.sekolah_id = ?
+    `;
+    let params = [req.sekolah_id, req.sekolah_id, req.sekolah_id, req.sekolah_id, req.sekolah_id];
+
+    if (guru_id) {
+      query += " AND kk.guru_id = ?";
+      params.push(guru_id);
+    }
+
+    if (kelas_id) {
+      query += " AND kk.kelas_id = ?";
+      params.push(kelas_id);
+    }
+
+    if (mata_pelajaran_id) {
+      query += " AND kk.mata_pelajaran_id = ?";
+      params.push(mata_pelajaran_id);
+    }
+
+    if (target) {
+      query += " AND kk.target = ?";
+      params.push(target);
+    }
+
+    if (tanggal) {
+      query += " AND kk.tanggal = ?";
+      params.push(tanggal);
+    }
+
+    query += " GROUP BY kk.id ORDER BY kk.tanggal DESC, kk.created_at DESC";
+
+    const connection = await getConnection();
+    const [kegiatan] = await connection.execute(query, params);
+    await connection.end();
+
+    console.log("Kegiatan ditemukan:", kegiatan.length);
+    res.json(kegiatan);
+  } catch (error) {
+    console.error("ERROR GET ALL KEGIATAN:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data kegiatan" });
+  }
+});
+
+app.get("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Mengambil kegiatan by ID:", id, "sekolah:", req.sekolah_id);
+
+    const connection = await getConnection();
+
+    const [kegiatan] = await connection.execute(
+      `
+      SELECT 
+        kk.*,
+        mp.nama as mata_pelajaran_nama,
+        kls.nama as kelas_nama,
+        u.nama as guru_nama,
+        bm.judul_bab,
+        sbm.judul_sub_bab,
+        GROUP_CONCAT(DISTINCT s.id) as siswa_target_ids,
+        GROUP_CONCAT(DISTINCT s.nama) as siswa_target_names
+      FROM kegiatan_kelas kk
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
+      JOIN kelas kls ON kk.kelas_id = kls.id
+      JOIN users u ON kk.guru_id = u.id
+      LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
+      LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
+      LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id
+      LEFT JOIN siswa s ON kst.siswa_id = s.id
+      WHERE kk.id = ? AND kk.sekolah_id = ?
+      GROUP BY kk.id
+    `,
+      [id, req.sekolah_id]
+    );
+
+    await connection.end();
+
+    if (kegiatan.length === 0) {
+      return res.status(404).json({ error: "Kegiatan tidak ditemukan" });
+    }
+
+    console.log("Kegiatan ditemukan:", kegiatan[0].judul);
+    res.json(kegiatan[0]);
+  } catch (error) {
+    console.error("ERROR GET KEGIATAN BY ID:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data kegiatan" });
+  }
+});
+
+// Get semua pengumuman
+app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    console.log("Mengambil data pengumuman untuk sekolah:", req.sekolah_id);
     const connection = await getConnection();
 
     const [pengumuman] = await connection.execute(`
@@ -6910,11 +8385,12 @@ app.get("/api/pengumuman", authenticateToken, async (req, res) => {
         u.role as pembuat_role
       FROM pengumuman p
       JOIN users u ON p.pembuat_id = u.id
-      LEFT JOIN kelas k ON p.kelas_id = k.id
+      LEFT JOIN kelas k ON p.kelas_id = k.id AND k.sekolah_id = ?
+      WHERE p.sekolah_id = ?
       ORDER BY 
         CASE WHEN p.prioritas = 'penting' THEN 1 ELSE 2 END,
         p.created_at DESC
-    `);
+    `, [req.sekolah_id, req.sekolah_id]);
 
     await connection.end();
     console.log(
@@ -6929,10 +8405,10 @@ app.get("/api/pengumuman", authenticateToken, async (req, res) => {
 });
 
 // Get pengumuman by ID
-app.get("/api/pengumuman/:id", authenticateToken, async (req, res) => {
+app.get("/api/pengumuman/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
-    console.log("Mengambil data pengumuman by ID:", id);
+    console.log("Mengambil data pengumuman by ID:", id, "sekolah:", req.sekolah_id);
 
     const connection = await getConnection();
     const [pengumuman] = await connection.execute(
@@ -6942,10 +8418,10 @@ app.get("/api/pengumuman/:id", authenticateToken, async (req, res) => {
         k.nama as kelas_nama,
         u.role as pembuat_role
       FROM pengumuman p
-      JOIN users u ON p.pembuat_id = u.id
-      LEFT JOIN kelas k ON p.kelas_id = k.id
-      WHERE p.id = ?`,
-      [id]
+      JOIN users u ON p.pembuat_id = u.id AND u.sekolah_id = ?
+      LEFT JOIN kelas k ON p.kelas_id = k.id AND k.sekolah_id = ?
+      WHERE p.id = ? AND p.sekolah_id = ?`,
+      [req.sekolah_id, req.sekolah_id, id, req.sekolah_id]
     );
     await connection.end();
 
@@ -6962,7 +8438,7 @@ app.get("/api/pengumuman/:id", authenticateToken, async (req, res) => {
 });
 
 // Create pengumuman baru
-app.post("/api/pengumuman", authenticateToken, async (req, res) => {
+app.post("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah pengumuman baru:", req.body);
     const {
@@ -6987,10 +8463,23 @@ app.post("/api/pengumuman", authenticateToken, async (req, res) => {
 
     const connection = await getConnection();
 
+    // Cek apakah kelas termasuk dalam sekolah yang sama (jika ada kelas_id)
+    if (kelas_id) {
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelas_id, req.sekolah_id]
+      );
+
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
     await connection.execute(
       `INSERT INTO pengumuman 
-        (id, judul, konten, kelas_id, role_target, pembuat_id, prioritas, tanggal_awal, tanggal_akhir) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, judul, konten, kelas_id, role_target, pembuat_id, prioritas, tanggal_awal, tanggal_akhir, sekolah_id) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         judul,
@@ -7001,6 +8490,7 @@ app.post("/api/pengumuman", authenticateToken, async (req, res) => {
         prioritas || "biasa",
         tanggal_awal || null,
         tanggal_akhir || null,
+        req.sekolah_id, // Tambahkan sekolah_id
       ]
     );
 
@@ -7019,7 +8509,7 @@ app.post("/api/pengumuman", authenticateToken, async (req, res) => {
 });
 
 // Update pengumuman
-app.put("/api/pengumuman/:id", authenticateToken, async (req, res) => {
+app.put("/api/pengumuman/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
     console.log("Update pengumuman:", id, req.body);
@@ -7043,11 +8533,35 @@ app.put("/api/pengumuman/:id", authenticateToken, async (req, res) => {
 
     const connection = await getConnection();
 
+    // Cek apakah pengumuman termasuk dalam sekolah yang sama
+    const [pengumumanCheck] = await connection.execute(
+      "SELECT id FROM pengumuman WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (pengumumanCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Pengumuman tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama (jika ada kelas_id)
+    if (kelas_id) {
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelas_id, req.sekolah_id]
+      );
+
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
     await connection.execute(
       `UPDATE pengumuman 
        SET judul = ?, konten = ?, kelas_id = ?, role_target = ?, 
            prioritas = ?, tanggal_awal = ?, tanggal_akhir = ?, updated_at = NOW()
-       WHERE id = ?`,
+       WHERE id = ? AND sekolah_id = ?`,
       [
         judul,
         konten,
@@ -7057,6 +8571,7 @@ app.put("/api/pengumuman/:id", authenticateToken, async (req, res) => {
         tanggal_awal || null,
         tanggal_akhir || null,
         id,
+        req.sekolah_id, // Tambahkan sekolah_id di WHERE
       ]
     );
 
@@ -7072,13 +8587,28 @@ app.put("/api/pengumuman/:id", authenticateToken, async (req, res) => {
 });
 
 // Delete pengumuman
-app.delete("/api/pengumuman/:id", authenticateToken, async (req, res) => {
+app.delete("/api/pengumuman/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
-    console.log("Delete pengumuman:", id);
+    console.log("Delete pengumuman:", id, "sekolah:", req.sekolah_id);
 
     const connection = await getConnection();
-    await connection.execute("DELETE FROM pengumuman WHERE id = ?", [id]);
+
+    // Cek apakah pengumuman termasuk dalam sekolah yang sama
+    const [pengumumanCheck] = await connection.execute(
+      "SELECT id FROM pengumuman WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (pengumumanCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Pengumuman tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    await connection.execute(
+      "DELETE FROM pengumuman WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
     await connection.end();
 
     console.log("Pengumuman berhasil dihapus:", id);
@@ -7091,14 +8621,16 @@ app.delete("/api/pengumuman/:id", authenticateToken, async (req, res) => {
 });
 
 // Get pengumuman untuk user berdasarkan role dan kelas
-app.get("/api/pengumuman/user/current", authenticateToken, async (req, res) => {
+app.get("/api/pengumuman/user/current", authenticateTokenAndSchool, async (req, res) => {
   try {
     const user = req.user;
     console.log(
       "Mengambil pengumuman untuk user:",
       user.id,
       "role:",
-      user.role
+      user.role,
+      "sekolah:",
+      req.sekolah_id
     );
 
     const connection = await getConnection();
@@ -7110,21 +8642,21 @@ app.get("/api/pengumuman/user/current", authenticateToken, async (req, res) => {
         k.nama as kelas_nama,
         u.role as pembuat_role
       FROM pengumuman p
-      JOIN users u ON p.pembuat_id = u.id
-      LEFT JOIN kelas k ON p.kelas_id = k.id
-      WHERE 1=1
+      JOIN users u ON p.pembuat_id = u.id AND u.sekolah_id = ?
+      LEFT JOIN kelas k ON p.kelas_id = k.id AND k.sekolah_id = ?
+      WHERE p.sekolah_id = ?
         AND (p.tanggal_awal IS NULL OR p.tanggal_awal <= CURDATE())
         AND (p.tanggal_akhir IS NULL OR p.tanggal_akhir >= CURDATE())
     `;
 
-    let params = [];
+    let params = [req.sekolah_id, req.sekolah_id, req.sekolah_id];
 
     // Filter berdasarkan role user
     if (user.role === "siswa") {
       // Untuk siswa: ambil pengumuman untuk role 'all', 'siswa', atau kelas siswa
       const [siswaData] = await connection.execute(
-        "SELECT kelas_id FROM siswa WHERE id = ?",
-        [user.id]
+        "SELECT kelas_id FROM siswa WHERE id = ? AND sekolah_id = ?",
+        [user.id, req.sekolah_id]
       );
 
       if (siswaData.length > 0) {
@@ -7141,14 +8673,14 @@ app.get("/api/pengumuman/user/current", authenticateToken, async (req, res) => {
       // Untuk guru: ambil pengumuman untuk role 'all', 'guru', atau kelas yang diampu
       query += ` AND (
         p.role_target IN ('all', 'guru') 
-        OR (p.kelas_id IN (SELECT kelas_id FROM jadwal_mengajar WHERE guru_id = ?))
+        OR (p.kelas_id IN (SELECT kelas_id FROM jadwal_mengajar WHERE guru_id = ? AND sekolah_id = ?))
       )`;
-      params.push(user.id);
+      params.push(user.id, req.sekolah_id);
     } else if (user.role === "wali") {
       // Untuk wali: ambil pengumuman untuk role 'all', 'wali', atau kelas anaknya
       const [siswaData] = await connection.execute(
-        "SELECT kelas_id FROM siswa WHERE id IN (SELECT siswa_id FROM users WHERE id = ?)",
-        [user.id]
+        "SELECT kelas_id FROM siswa WHERE id IN (SELECT siswa_id FROM users WHERE id = ?) AND sekolah_id = ?",
+        [user.id, req.sekolah_id]
       );
 
       if (siswaData.length > 0) {
@@ -7162,7 +8694,7 @@ app.get("/api/pengumuman/user/current", authenticateToken, async (req, res) => {
         query += ` AND p.role_target IN ('all', 'wali')`;
       }
     } else if (user.role === "admin") {
-      // Admin bisa melihat semua pengumuman
+      // Admin bisa melihat semua pengumuman di sekolahnya
       // Tidak perlu filter tambahan
     } else {
       // Untuk role lainnya, hanya ambil pengumuman umum
@@ -7190,10 +8722,10 @@ app.get("/api/pengumuman/user/current", authenticateToken, async (req, res) => {
 });
 
 // Backup endpoint untuk pengumuman
-app.get("/api/pengumuman/fallback", authenticateToken, async (req, res) => {
+app.get("/api/pengumuman/fallback", authenticateTokenAndSchool, async (req, res) => {
   try {
     const user = req.user;
-    console.log("Mengambil pengumuman fallback untuk:", user.role);
+    console.log("Mengambil pengumuman fallback untuk:", user.role, "sekolah:", req.sekolah_id);
 
     const connection = await getConnection();
 
@@ -7204,9 +8736,10 @@ app.get("/api/pengumuman/fallback", authenticateToken, async (req, res) => {
         u.nama as pembuat_nama,
         k.nama as kelas_nama
       FROM pengumuman p
-      JOIN users u ON p.pembuat_id = u.id
-      LEFT JOIN kelas k ON p.kelas_id = k.id
-      WHERE p.role_target IN ('all', ?)
+      JOIN users u ON p.pembuat_id = u.id AND u.sekolah_id = ?
+      LEFT JOIN kelas k ON p.kelas_id = k.id AND k.sekolah_id = ?
+      WHERE p.sekolah_id = ?
+        AND p.role_target IN ('all', ?)
         AND (p.tanggal_awal IS NULL OR p.tanggal_awal <= CURDATE())
         AND (p.tanggal_akhir IS NULL OR p.tanggal_akhir >= CURDATE())
       ORDER BY 
@@ -7215,7 +8748,7 @@ app.get("/api/pengumuman/fallback", authenticateToken, async (req, res) => {
       LIMIT 50
     `;
 
-    const [pengumuman] = await connection.execute(query, [user.role]);
+    const [pengumuman] = await connection.execute(query, [req.sekolah_id, req.sekolah_id, req.sekolah_id, user.role]);
     await connection.end();
 
     console.log("Pengumuman fallback ditemukan:", pengumuman.length);
@@ -7227,7 +8760,8 @@ app.get("/api/pengumuman/fallback", authenticateToken, async (req, res) => {
 });
 
 // Create kegiatan baru
-app.post("/api/kegiatan", authenticateToken, async (req, res) => {
+app.post("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
   try {
     console.log("Menambah kegiatan baru:", req.body);
     const {
@@ -7269,18 +8803,51 @@ app.post("/api/kegiatan", authenticateToken, async (req, res) => {
     }
 
     const id = crypto.randomUUID();
-    const connection = await getConnection();
+    connection = await getConnection();
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guru_id, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama
+    const [kelasCheck] = await connection.execute(
+      "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+      [kelas_id, req.sekolah_id]
+    );
+
+    if (kelasCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+    }
 
     // Mulai transaction
     await connection.beginTransaction();
 
     try {
-      // Insert kegiatan utama
+      // Insert kegiatan utama dengan sekolah_id
       await connection.execute(
         `INSERT INTO kegiatan_kelas 
          (id, guru_id, mata_pelajaran_id, kelas_id, judul, deskripsi, jenis, target, 
-          bab_id, sub_bab_id, batas_waktu, tanggal, hari) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          bab_id, sub_bab_id, batas_waktu, tanggal, hari, sekolah_id) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           guru_id,
@@ -7295,11 +8862,25 @@ app.post("/api/kegiatan", authenticateToken, async (req, res) => {
           batas_waktu || null,
           tanggal,
           hari,
+          req.sekolah_id, // Tambahkan sekolah_id
         ]
       );
 
-      // Jika target khusus, insert siswa target
+      // Jika target khusus, insert siswa target dengan validasi
       if (target === "khusus" && siswa_target && siswa_target.length > 0) {
+        // Cek apakah semua siswa termasuk dalam sekolah yang sama
+        const placeholders = siswa_target.map(() => '?').join(',');
+        const [siswaCheck] = await connection.execute(
+          `SELECT id FROM siswa WHERE id IN (${placeholders}) AND sekolah_id = ?`,
+          [...siswa_target, req.sekolah_id]
+        );
+
+        if (siswaCheck.length !== siswa_target.length) {
+          await connection.rollback();
+          await connection.end();
+          return res.status(400).json({ error: "Beberapa siswa tidak ditemukan atau tidak memiliki akses" });
+        }
+
         for (const siswaId of siswa_target) {
           const targetId = crypto.randomUUID();
           await connection.execute(
@@ -7340,12 +8921,16 @@ app.post("/api/kegiatan", authenticateToken, async (req, res) => {
 });
 
 // Update kegiatan
-app.put("/api/kegiatan/:id", authenticateToken, async (req, res) => {
+app.put("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
   try {
     const { id } = req.params;
     console.log("Update kegiatan:", id, req.body);
 
     const {
+      guru_id,
+      mata_pelajaran_id,
+      kelas_id,
       judul,
       deskripsi,
       jenis,
@@ -7358,30 +8943,121 @@ app.put("/api/kegiatan/:id", authenticateToken, async (req, res) => {
       siswa_target,
     } = req.body;
 
-    const connection = await getConnection();
+    connection = await getConnection();
+
+    // Cek apakah kegiatan termasuk dalam sekolah yang sama
+    const [kegiatanCheck] = await connection.execute(
+      "SELECT id FROM kegiatan_kelas WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (kegiatanCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kegiatan tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Validasi data terkait jika diupdate
+    if (guru_id) {
+      const [guruCheck] = await connection.execute(
+        "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+        [guru_id, req.sekolah_id]
+      );
+
+      if (guruCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
+    if (mata_pelajaran_id) {
+      const [mapelCheck] = await connection.execute(
+        "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+        [mata_pelajaran_id, req.sekolah_id]
+      );
+
+      if (mapelCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
+    if (kelas_id) {
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelas_id, req.sekolah_id]
+      );
+
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
     await connection.beginTransaction();
 
     try {
       // Update kegiatan utama
-      await connection.execute(
-        `UPDATE kegiatan_kelas 
-         SET judul = ?, deskripsi = ?, jenis = ?, target = ?, 
-             bab_id = ?, sub_bab_id = ?, batas_waktu = ?, tanggal = ?, hari = ?,
-             updated_at = NOW()
-         WHERE id = ?`,
-        [
-          judul,
-          deskripsi || null,
-          jenis,
-          target,
-          bab_id || null,
-          sub_bab_id || null,
-          batas_waktu || null,
-          tanggal,
-          hari,
-          id,
-        ]
-      );
+      const updateFields = [];
+      const updateValues = [];
+
+      if (guru_id) {
+        updateFields.push("guru_id = ?");
+        updateValues.push(guru_id);
+      }
+      if (mata_pelajaran_id) {
+        updateFields.push("mata_pelajaran_id = ?");
+        updateValues.push(mata_pelajaran_id);
+      }
+      if (kelas_id) {
+        updateFields.push("kelas_id = ?");
+        updateValues.push(kelas_id);
+      }
+      if (judul) {
+        updateFields.push("judul = ?");
+        updateValues.push(judul);
+      }
+      if (deskripsi !== undefined) {
+        updateFields.push("deskripsi = ?");
+        updateValues.push(deskripsi || null);
+      }
+      if (jenis) {
+        updateFields.push("jenis = ?");
+        updateValues.push(jenis);
+      }
+      if (target) {
+        updateFields.push("target = ?");
+        updateValues.push(target);
+      }
+      if (bab_id !== undefined) {
+        updateFields.push("bab_id = ?");
+        updateValues.push(bab_id || null);
+      }
+      if (sub_bab_id !== undefined) {
+        updateFields.push("sub_bab_id = ?");
+        updateValues.push(sub_bab_id || null);
+      }
+      if (batas_waktu !== undefined) {
+        updateFields.push("batas_waktu = ?");
+        updateValues.push(batas_waktu || null);
+      }
+      if (tanggal) {
+        updateFields.push("tanggal = ?");
+        updateValues.push(tanggal);
+      }
+      if (hari) {
+        updateFields.push("hari = ?");
+        updateValues.push(hari);
+      }
+
+      updateFields.push("updated_at = NOW()");
+      updateValues.push(id, req.sekolah_id);
+
+      if (updateFields.length > 0) {
+        await connection.execute(
+          `UPDATE kegiatan_kelas SET ${updateFields.join(', ')} WHERE id = ? AND sekolah_id = ?`,
+          updateValues
+        );
+      }
 
       // Hapus siswa target lama
       await connection.execute(
@@ -7391,6 +9067,19 @@ app.put("/api/kegiatan/:id", authenticateToken, async (req, res) => {
 
       // Insert siswa target baru jika target khusus
       if (target === "khusus" && siswa_target && siswa_target.length > 0) {
+        // Cek apakah semua siswa termasuk dalam sekolah yang sama
+        const placeholders = siswa_target.map(() => '?').join(',');
+        const [siswaCheck] = await connection.execute(
+          `SELECT id FROM siswa WHERE id IN (${placeholders}) AND sekolah_id = ?`,
+          [...siswa_target, req.sekolah_id]
+        );
+
+        if (siswaCheck.length !== siswa_target.length) {
+          await connection.rollback();
+          await connection.end();
+          return res.status(400).json({ error: "Beberapa siswa tidak ditemukan atau tidak memiliki akses" });
+        }
+
         for (const siswaId of siswa_target) {
           const targetId = crypto.randomUUID();
           await connection.execute(
@@ -7415,17 +9104,30 @@ app.put("/api/kegiatan/:id", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Gagal mengupdate kegiatan" });
   }
 });
-
 // Delete kegiatan
-app.delete("/api/kegiatan/:id", authenticateToken, async (req, res) => {
+app.delete("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { id } = req.params;
-    console.log("Delete kegiatan:", id);
+    console.log("Delete kegiatan:", id, "sekolah:", req.sekolah_id);
 
     const connection = await getConnection();
 
+    // Cek apakah kegiatan termasuk dalam sekolah yang sama
+    const [kegiatanCheck] = await connection.execute(
+      "SELECT id FROM kegiatan_kelas WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (kegiatanCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Kegiatan tidak ditemukan atau tidak memiliki akses" });
+    }
+
     // Hapus otomatis akan cascade ke kegiatan_siswa_target karena foreign key constraint
-    await connection.execute("DELETE FROM kegiatan_kelas WHERE id = ?", [id]);
+    await connection.execute(
+      "DELETE FROM kegiatan_kelas WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
     await connection.end();
 
     console.log("Kegiatan berhasil dihapus:", id);
@@ -7437,12 +9139,25 @@ app.delete("/api/kegiatan/:id", authenticateToken, async (req, res) => {
 });
 
 // Get jadwal untuk dropdown (disesuaikan)
-app.get("/api/jadwal/guru/:guruId", authenticateToken, async (req, res) => {
+app.get("/api/jadwal/guru/:guruId", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { guruId } = req.params;
     const { hari, tahun_ajaran } = req.query;
 
-    console.log("Mengambil jadwal untuk form kegiatan:", guruId);
+    console.log("Mengambil jadwal untuk form kegiatan:", guruId, "sekolah:", req.sekolah_id);
+
+    const connection = await getConnection();
+
+    // Cek apakah guru termasuk dalam sekolah yang sama
+    const [guruCheck] = await connection.execute(
+      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      [guruId, req.sekolah_id]
+    );
+
+    if (guruCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+    }
 
     let query = `
       SELECT 
@@ -7454,13 +9169,13 @@ app.get("/api/jadwal/guru/:guruId", authenticateToken, async (req, res) => {
         jm.hari_id,
         h.nama as hari_nama
       FROM jadwal_mengajar jm
-      JOIN kelas k ON jm.kelas_id = k.id
-      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id
+      JOIN kelas k ON jm.kelas_id = k.id AND k.sekolah_id = ?
+      JOIN mata_pelajaran mp ON jm.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
       JOIN hari h ON jm.hari_id = h.id
-      WHERE jm.guru_id = ?
+      WHERE jm.guru_id = ? AND jm.sekolah_id = ?
     `;
 
-    let params = [guruId];
+    let params = [req.sekolah_id, req.sekolah_id, guruId, req.sekolah_id];
 
     if (hari && hari !== "Semua Hari") {
       query += " AND h.nama = ?";
@@ -7474,7 +9189,6 @@ app.get("/api/jadwal/guru/:guruId", authenticateToken, async (req, res) => {
 
     query += " ORDER BY h.urutan, k.nama";
 
-    const connection = await getConnection();
     const [jadwal] = await connection.execute(query, params);
     await connection.end();
 
