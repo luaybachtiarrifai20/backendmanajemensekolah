@@ -8,7 +8,7 @@ const multer = require("multer");
 const path = require("path");
 const XLSX = require("xlsx");
 const fs = require("fs");
-const cron = require('node-cron');
+const cron = require("node-cron");
 require("dotenv").config();
 const app = express();
 app.use(express.json());
@@ -1266,7 +1266,7 @@ app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
       SELECT s.*, k.nama as kelas_nama 
       FROM siswa s 
       LEFT JOIN kelas k ON s.kelas_id = k.id
-      WHERE s.sekolah_id = ?  -- Tambahkan filter sekolah_id
+      WHERE s.sekolah_id = ?
     `,
       [req.sekolah_id]
     );
@@ -4271,19 +4271,29 @@ app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
 // Kelola Absensi
 app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
   try {
-    const { guru_id, tanggal, mata_pelajaran_id, siswa_id } = req.query;
+    const { guru_id, tanggal, mata_pelajaran_id, siswa_id, kelas_id } =
+      req.query;
     console.log("Mengambil data absensi untuk sekolah:", req.sekolah_id);
 
     let query = `
-      SELECT a.*, s.nama as siswa_nama, s.nis, k.nama as kelas_nama, mp.nama as mata_pelajaran_nama
+      SELECT 
+        a.*, 
+        s.nama as siswa_nama, 
+        s.nis, 
+        k.nama as kelas_nama, 
+        k.id as kelas_id, 
+        mp.nama as mata_pelajaran_nama,
+        g.nama as guru_nama
       FROM absensi a
       JOIN siswa s ON a.siswa_id = s.id
       JOIN kelas k ON s.kelas_id = k.id
       JOIN mata_pelajaran mp ON a.mata_pelajaran_id = mp.id
+      LEFT JOIN guru g ON a.guru_id = g.id
       WHERE s.sekolah_id = ? AND mp.sekolah_id = ?
     `;
     let params = [req.sekolah_id, req.sekolah_id];
 
+    // Filter conditions
     if (guru_id) {
       query += " AND a.guru_id = ?";
       params.push(guru_id);
@@ -4303,6 +4313,14 @@ app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
       query += " AND a.siswa_id = ?";
       params.push(siswa_id);
     }
+
+    if (kelas_id) {
+      query += " AND s.kelas_id = ?";
+      params.push(kelas_id);
+    }
+
+    // Optional: Order by tanggal descending (yang terbaru di atas)
+    query += " ORDER BY a.tanggal DESC, s.nama ASC";
 
     const connection = await getConnection();
     const [absensi] = await connection.execute(query, params);
@@ -9569,46 +9587,72 @@ app.get(
 );
 
 // Create jenis pembayaran
-app.post("/api/jenis-pembayaran", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    const { nama, deskripsi, jumlah, periode, status, tujuan } = req.body;
-    
-    const connection = await getConnection();
-    const id = crypto.randomUUID();
-    
-    await connection.execute(
-      "INSERT INTO jenis_pembayaran (id, nama, deskripsi, jumlah, periode, status, tujuan, sekolah_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      [id, nama, deskripsi, jumlah, periode, status, JSON.stringify(tujuan), req.sekolah_id]
-    );
-    
-    await connection.end();
-    res.json({ message: "Jenis pembayaran berhasil dibuat", id });
-  } catch (error) {
-    console.error("ERROR CREATE JENIS PEMBAYARAN:", error.message);
-    res.status(500).json({ error: "Gagal membuat jenis pembayaran" });
+app.post(
+  "/api/jenis-pembayaran",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const { nama, deskripsi, jumlah, periode, status, tujuan } = req.body;
+
+      const connection = await getConnection();
+      const id = crypto.randomUUID();
+
+      await connection.execute(
+        "INSERT INTO jenis_pembayaran (id, nama, deskripsi, jumlah, periode, status, tujuan, sekolah_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          id,
+          nama,
+          deskripsi,
+          jumlah,
+          periode,
+          status,
+          JSON.stringify(tujuan),
+          req.sekolah_id,
+        ]
+      );
+
+      await connection.end();
+      res.json({ message: "Jenis pembayaran berhasil dibuat", id });
+    } catch (error) {
+      console.error("ERROR CREATE JENIS PEMBAYARAN:", error.message);
+      res.status(500).json({ error: "Gagal membuat jenis pembayaran" });
+    }
   }
-});
+);
 
 // Update jenis pembayaran
-app.put("/api/jenis-pembayaran/:id", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { nama, deskripsi, jumlah, periode, status, tujuan } = req.body;
-    
-    const connection = await getConnection();
-    
-    await connection.execute(
-      "UPDATE jenis_pembayaran SET nama = ?, deskripsi = ?, jumlah = ?, periode = ?, status = ?, tujuan = ? WHERE id = ? AND sekolah_id = ?",
-      [nama, deskripsi, jumlah, periode, status, JSON.stringify(tujuan), id, req.sekolah_id]
-    );
-    
-    await connection.end();
-    res.json({ message: "Jenis pembayaran berhasil diupdate" });
-  } catch (error) {
-    console.error("ERROR UPDATE JENIS PEMBAYARAN:", error.message);
-    res.status(500).json({ error: "Gagal mengupdate jenis pembayaran" });
+app.put(
+  "/api/jenis-pembayaran/:id",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { nama, deskripsi, jumlah, periode, status, tujuan } = req.body;
+
+      const connection = await getConnection();
+
+      await connection.execute(
+        "UPDATE jenis_pembayaran SET nama = ?, deskripsi = ?, jumlah = ?, periode = ?, status = ?, tujuan = ? WHERE id = ? AND sekolah_id = ?",
+        [
+          nama,
+          deskripsi,
+          jumlah,
+          periode,
+          status,
+          JSON.stringify(tujuan),
+          id,
+          req.sekolah_id,
+        ]
+      );
+
+      await connection.end();
+      res.json({ message: "Jenis pembayaran berhasil diupdate" });
+    } catch (error) {
+      console.error("ERROR UPDATE JENIS PEMBAYARAN:", error.message);
+      res.status(500).json({ error: "Gagal mengupdate jenis pembayaran" });
+    }
   }
-});
+);
 
 // Delete jenis pembayaran
 app.delete(
@@ -9629,11 +9673,9 @@ app.delete(
 
       if (existing.length === 0) {
         await connection.end();
-        return res
-          .status(404)
-          .json({
-            error: "Jenis pembayaran tidak ditemukan atau tidak memiliki akses",
-          });
+        return res.status(404).json({
+          error: "Jenis pembayaran tidak ditemukan atau tidak memiliki akses",
+        });
       }
 
       // Cek apakah ada tagihan yang menggunakan jenis pembayaran ini
