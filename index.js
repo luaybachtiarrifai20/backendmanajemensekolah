@@ -82,6 +82,7 @@ const authenticateTokenAndSchool = async (req, res, next) => {
     const [userSchools] = await connection.execute(
       `SELECT 
         u.*,
+        us.id as user_school_id,
         us.sekolah_id,
         us.is_active as users_school_active,
         s.nama_sekolah, 
@@ -92,49 +93,47 @@ const authenticateTokenAndSchool = async (req, res, next) => {
        FROM users u 
        JOIN users_schools us ON u.id = us.user_id
        JOIN sekolah s ON us.sekolah_id = s.id 
-       WHERE u.id = ? AND us.is_active = TRUE`,
-      [user.id]
+       WHERE u.id = ? AND us.sekolah_id = ? AND us.is_active = TRUE`,
+      [user.id, user.sekolah_id]
     );
 
-    await connection.end();
-
     if (userSchools.length === 0) {
+      await connection.end();
       return res.status(403).json({
-        error:
-          "Akun tidak terdaftar di sekolah manapun atau akses dinonaktifkan",
+        error: "Akun tidak terdaftar di sekolah ini atau akses dinonaktifkan",
       });
     }
 
-    // Jika user punya multiple sekolah aktif, gunakan sekolah_id dari token atau ambil pertama
-    let selectedSchool = userSchools[0];
-
-    // Jika token punya sekolah_id, cari yang sesuai
-    if (user.sekolah_id) {
-      const schoolFromToken = userSchools.find(
-        (us) => us.sekolah_id === user.sekolah_id
-      );
-      if (schoolFromToken) {
-        selectedSchool = schoolFromToken;
-      }
-    }
+    const selectedSchool = userSchools[0];
 
     if (selectedSchool.sekolah_status !== "aktif") {
+      await connection.end();
       return res.status(403).json({
         error: "Sekolah tidak aktif. Silakan hubungi administrator.",
       });
     }
 
-    if (!selectedSchool.users_school_active) {
+    // Cek apakah role di token valid untuk user_school ini
+    const [validRoles] = await connection.execute(
+      `SELECT role FROM users_roles 
+       WHERE user_school_id = ? AND role = ? AND is_active = TRUE`,
+      [selectedSchool.user_school_id, user.role]
+    );
+
+    if (validRoles.length === 0) {
+      await connection.end();
       return res.status(403).json({
-        error: "Akses ke sekolah ini dinonaktifkan.",
+        error: "Role tidak valid untuk sekolah ini",
       });
     }
+
+    await connection.end();
 
     // Tambahkan data lengkap ke request
     req.user = {
       id: selectedSchool.id,
       email: selectedSchool.email,
-      role: selectedSchool.role,
+      role: user.role,
       nama: selectedSchool.nama,
       // Data sekolah
       sekolah_id: selectedSchool.sekolah_id,
@@ -144,6 +143,7 @@ const authenticateTokenAndSchool = async (req, res, next) => {
       sekolah_telepon: selectedSchool.sekolah_telepon,
       sekolah_email: selectedSchool.sekolah_email,
       // Data user_schools
+      user_school_id: selectedSchool.user_school_id,
       users_school_active: selectedSchool.users_school_active,
       // Data tambahan user
       kelas_id: selectedSchool.kelas_id,
@@ -151,13 +151,6 @@ const authenticateTokenAndSchool = async (req, res, next) => {
       is_wali_kelas: selectedSchool.is_wali_kelas,
       siswa_id: selectedSchool.siswa_id,
       created_at: selectedSchool.created_at,
-      // Daftar sekolah yang bisa diakses
-      accessible_schools: userSchools.map((us) => ({
-        sekolah_id: us.sekolah_id,
-        nama_sekolah: us.nama_sekolah,
-        status: us.sekolah_status,
-        users_school_active: us.users_school_active,
-      })),
     };
 
     req.sekolah_id = selectedSchool.sekolah_id;
@@ -365,7 +358,7 @@ app.use((req, res, next) => {
 app.post("/api/login", async (req, res) => {
   try {
     console.log("Login attempt:", req.body.email);
-    const { email, password, sekolah_id } = req.body;
+    const { email, password, sekolah_id, role } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: "Email dan password diperlukan" });
@@ -403,9 +396,9 @@ app.post("/api/login", async (req, res) => {
         s.alamat as sekolah_alamat,
         s.telepon as sekolah_telepon,
         s.email as sekolah_email
-       FROM users_schools us
-       JOIN sekolah s ON us.sekolah_id = s.id
-       WHERE us.user_id = ? AND us.is_active = TRUE`,
+      FROM users_schools us
+      JOIN sekolah s ON us.sekolah_id = s.id
+      WHERE us.user_id = ? AND us.is_active = TRUE`,
       [user.id]
     );
 
@@ -444,7 +437,18 @@ app.post("/api/login", async (req, res) => {
       selectedSchool = requestedSchool;
     }
 
-    // Jika user punya multiple sekolah dan tidak memilih, kembalikan daftar
+    // PERBAIKAN: Cek role yang tersedia untuk sekolah yang dipilih
+    const [userRoles] = await connection.execute(
+      `SELECT ur.role 
+      FROM users_roles ur
+      JOIN users_schools us ON ur.user_school_id = us.id
+      WHERE us.user_id = ? AND us.sekolah_id = ? AND ur.is_active = TRUE`,
+      [user.id, selectedSchool.sekolah_id]
+    );
+
+    const availableRoles = userRoles.map((ur) => ur.role);
+
+    // Jika user punya multiple sekolah dan tidak memilih, kembalikan daftar sekolah
     if (activeSchools.length > 1 && !sekolah_id) {
       await connection.end();
 
@@ -463,17 +467,49 @@ app.post("/api/login", async (req, res) => {
           id: user.id,
           nama: user.nama,
           email: user.email,
-          role: user.role,
         },
       });
     }
 
-    // Generate token dengan sekolah_id
+    // PERBAIKAN: Jika sudah memilih sekolah tapi punya multiple role dan belum pilih role
+    if (availableRoles.length > 1 && !role) {
+      await connection.end();
+
+      return res.status(200).json({
+        message: "Pilih role untuk login",
+        pilih_role: true,
+        role_list: availableRoles,
+        user: {
+          id: user.id,
+          nama: user.nama,
+          email: user.email,
+        },
+        sekolah: {
+          id: selectedSchool.sekolah_id,
+          nama_sekolah: selectedSchool.nama_sekolah,
+          alamat: selectedSchool.sekolah_alamat,
+          telepon: selectedSchool.sekolah_telepon,
+        },
+      });
+    }
+
+    // Tentukan role yang akan digunakan
+    let selectedRole = role || availableRoles[0];
+
+    // Validasi role yang dipilih
+    if (role && !availableRoles.includes(role)) {
+      await connection.end();
+      return res.status(403).json({
+        error: "Role tidak valid untuk sekolah ini",
+      });
+    }
+
+    // Generate token dengan sekolah_id dan role
     const token = jwt.sign(
       {
         id: user.id,
         email: user.email,
-        role: user.role,
+        role: selectedRole,
         sekolah_id: selectedSchool.sekolah_id,
         nama: user.nama,
       },
@@ -487,15 +523,18 @@ app.post("/api/login", async (req, res) => {
       "Login berhasil:",
       user.email,
       "sekolah:",
-      selectedSchool.nama_sekolah
+      selectedSchool.nama_sekolah,
+      "role:",
+      selectedRole
     );
+
     res.json({
       token,
       user: {
         id: user.id,
         nama: user.nama,
         email: user.email,
-        role: user.role,
+        role: selectedRole,
         kelas_id: user.kelas_id,
         sekolah_id: selectedSchool.sekolah_id,
         nama_sekolah: selectedSchool.nama_sekolah,
@@ -511,6 +550,95 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// Get available roles untuk user di sekolah tertentu
+app.get("/api/user/roles", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const connection = await getConnection();
+
+    const [userRoles] = await connection.execute(
+      `SELECT ur.role 
+        FROM users_roles ur
+        JOIN users_schools us ON ur.user_school_id = us.id
+        WHERE us.user_id = ? AND us.sekolah_id = ? AND ur.is_active = TRUE`,
+      [req.user.id, req.user.sekolah_id]
+    );
+
+    await connection.end();
+
+    const roles = userRoles.map((ur) => ur.role);
+
+    res.json({
+      available_roles: roles,
+      current_role: req.user.role,
+    });
+  } catch (error) {
+    console.error("ERROR GET USER ROLES:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data roles user" });
+  }
+});
+
+// Switch role
+app.post("/api/switch-role", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { role } = req.body;
+
+    if (!role) {
+      return res.status(400).json({ error: "Role diperlukan" });
+    }
+
+    const connection = await getConnection();
+
+    // Cek apakah role tersedia untuk user
+    const [userRoles] = await connection.execute(
+      `SELECT ur.role 
+        FROM users_roles ur
+        JOIN users_schools us ON ur.user_school_id = us.id
+        WHERE us.user_id = ? AND us.sekolah_id = ? AND ur.role = ? AND ur.is_active = TRUE`,
+      [req.user.id, req.user.sekolah_id, role]
+    );
+
+    if (userRoles.length === 0) {
+      await connection.end();
+      return res.status(403).json({
+        error: "Tidak memiliki akses ke role ini",
+      });
+    }
+
+    // Get user data
+    const [users] = await connection.execute(
+      "SELECT * FROM users WHERE id = ?",
+      [req.user.id]
+    );
+
+    await connection.end();
+
+    const user = users[0];
+
+    // Generate token baru dengan role yang dipilih
+    const newToken = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: role,
+        sekolah_id: req.user.sekolah_id,
+        nama: user.nama,
+        user_school_id: req.user.user_school_id,
+      },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    res.json({
+      message: "Berhasil pindah role",
+      token: newToken,
+      role: role,
+    });
+  } catch (error) {
+    console.error("ERROR SWITCH ROLE:", error.message);
+    res.status(500).json({ error: "Gagal pindah role" });
+  }
+});
+
 // Get semua sekolah yang bisa diakses user
 app.get("/api/user/schools", authenticateTokenAndSchool, async (req, res) => {
   try {
@@ -518,16 +646,16 @@ app.get("/api/user/schools", authenticateTokenAndSchool, async (req, res) => {
 
     const [userSchools] = await connection.execute(
       `SELECT 
-        us.*,
-        s.nama_sekolah,
-        s.status as sekolah_status,
-        s.alamat,
-        s.telepon,
-        s.email
-       FROM users_schools us
-       JOIN sekolah s ON us.sekolah_id = s.id
-       WHERE us.user_id = ?
-       ORDER BY us.is_active DESC, s.nama_sekolah`,
+          us.*,
+          s.nama_sekolah,
+          s.status as sekolah_status,
+          s.alamat,
+          s.telepon,
+          s.email
+        FROM users_schools us
+        JOIN sekolah s ON us.sekolah_id = s.id
+        WHERE us.user_id = ?
+        ORDER BY us.is_active DESC, s.nama_sekolah`,
       [req.user.id]
     );
 
@@ -554,9 +682,9 @@ app.post("/api/switch-school", authenticateTokenAndSchool, async (req, res) => {
     // Cek apakah user punya akses ke sekolah yang diminta
     const [userSchools] = await connection.execute(
       `SELECT us.*, s.status as sekolah_status 
-       FROM users_schools us
-       JOIN sekolah s ON us.sekolah_id = s.id 
-       WHERE us.user_id = ? AND us.sekolah_id = ? AND us.is_active = TRUE`,
+        FROM users_schools us
+        JOIN sekolah s ON us.sekolah_id = s.id 
+        WHERE us.user_id = ? AND us.sekolah_id = ? AND us.is_active = TRUE`,
       [req.user.id, sekolah_id]
     );
 
@@ -4283,17 +4411,17 @@ app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
         k.nama as kelas_nama, 
         k.id as kelas_id, 
         mp.nama as mata_pelajaran_nama,
-        g.nama as guru_nama
+        u.nama as guru_nama  -- PERUBAHAN: g.nama -> u.nama
       FROM absensi a
       JOIN siswa s ON a.siswa_id = s.id
       JOIN kelas k ON s.kelas_id = k.id
       JOIN mata_pelajaran mp ON a.mata_pelajaran_id = mp.id
-      LEFT JOIN guru g ON a.guru_id = g.id
+      LEFT JOIN users u ON a.guru_id = u.id AND u.role = 'guru'  -- PERUBAHAN: guru -> users
       WHERE s.sekolah_id = ? AND mp.sekolah_id = ?
     `;
     let params = [req.sekolah_id, req.sekolah_id];
 
-    // Filter conditions
+    // Filter conditions (tetap sama)
     if (guru_id) {
       query += " AND a.guru_id = ?";
       params.push(guru_id);
@@ -4319,7 +4447,6 @@ app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
       params.push(kelas_id);
     }
 
-    // Optional: Order by tanggal descending (yang terbaru di atas)
     query += " ORDER BY a.tanggal DESC, s.nama ASC";
 
     const connection = await getConnection();
@@ -8651,11 +8778,15 @@ app.get("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
 // Get semua pengumuman
 app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data pengumuman untuk sekolah:", req.sekolah_id);
-    const connection = await getConnection();
+    console.log(
+      "Mengambil data pengumuman untuk sekolah:",
+      req.sekolah_id,
+      "user role:",
+      req.user.role
+    );
 
-    const [pengumuman] = await connection.execute(
-      `
+    const connection = await getConnection();
+    let query = `
       SELECT 
         p.*,
         u.nama as pembuat_nama,
@@ -8665,14 +8796,35 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
       JOIN users u ON p.pembuat_id = u.id
       LEFT JOIN kelas k ON p.kelas_id = k.id AND k.sekolah_id = ?
       WHERE p.sekolah_id = ?
-      ORDER BY 
-        CASE WHEN p.prioritas = 'penting' THEN 1 ELSE 2 END,
-        p.created_at DESC
-    `,
-      [req.sekolah_id, req.sekolah_id]
-    );
+    `;
 
+    const params = [req.sekolah_id, req.sekolah_id];
+
+    // Jika bukan admin, filter berdasarkan role dan kelas
+    if (req.user.role !== "admin") {
+      query += ` AND (
+        p.role_target = 'all' 
+        OR p.role_target = ?
+        OR (p.kelas_id IS NULL AND p.role_target = ?)
+      `;
+      params.push(req.user.role, req.user.role);
+
+      // Jika user adalah siswa atau wali, tambahkan filter kelas
+      if (req.user.role === "siswa" || req.user.role === "wali") {
+        query += ` OR p.kelas_id IN (SELECT kelas_id FROM siswa WHERE user_id = ?)`;
+        params.push(req.user.id);
+      }
+
+      query += `)`;
+    }
+
+    query += ` ORDER BY 
+        CASE WHEN p.prioritas = 'penting' THEN 1 ELSE 2 END,
+        p.created_at DESC`;
+
+    const [pengumuman] = await connection.execute(query, params);
     await connection.end();
+
     console.log(
       "Berhasil mengambil data pengumuman, jumlah:",
       pengumuman.length
