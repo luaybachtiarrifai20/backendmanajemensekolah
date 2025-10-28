@@ -1177,13 +1177,23 @@ app.post("/api/validate-classes", async (req, res) => {
 app.post("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah kelas baru:", req.body);
-    const { nama, wali_kelas_id, grade_level } = req.body; // Tambahkan grade_level
+    const { nama, wali_kelas_id, grade_level } = req.body;
+    
+    // Validasi field wajib
+    if (!nama) {
+      return res.status(400).json({ error: "Nama kelas harus diisi" });
+    }
+    
     const id = crypto.randomUUID();
+
+    // Konversi undefined ke null untuk MySQL
+    const cleanWaliKelasId = wali_kelas_id !== undefined ? wali_kelas_id : null;
+    const cleanGradeLevel = grade_level !== undefined ? grade_level : null;
 
     const connection = await getConnection();
     await connection.execute(
-      "INSERT INTO kelas (id, nama, wali_kelas_id, grade_level, sekolah_id) VALUES (?, ?, ?, ?, ?)", // Tambahkan grade_level
-      [id, nama, wali_kelas_id, grade_level, req.sekolah_id]
+      "INSERT INTO kelas (id, nama, wali_kelas_id, grade_level, sekolah_id) VALUES (?, ?, ?, ?, ?)",
+      [id, nama, cleanWaliKelasId, cleanGradeLevel, req.sekolah_id]
     );
     await connection.end();
 
@@ -1202,6 +1212,15 @@ app.put("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
     console.log("Update kelas:", id, req.body);
     const { nama, wali_kelas_id, grade_level } = req.body;
 
+    // Validasi field wajib
+    if (!nama) {
+      return res.status(400).json({ error: "Nama kelas harus diisi" });
+    }
+
+    // Konversi undefined ke null untuk MySQL
+    const cleanWaliKelasId = wali_kelas_id !== undefined ? wali_kelas_id : null;
+    const cleanGradeLevel = grade_level !== undefined ? grade_level : null;
+
     const connection = await getConnection();
 
     // Cek apakah kelas termasuk dalam sekolah yang sama
@@ -1219,7 +1238,7 @@ app.put("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
 
     await connection.execute(
       "UPDATE kelas SET nama = ?, wali_kelas_id = ?, grade_level = ? WHERE id = ? AND sekolah_id = ?",
-      [nama, wali_kelas_id, grade_level, id, req.sekolah_id] // Tambahkan sekolah_id di WHERE
+      [nama, cleanWaliKelasId, cleanGradeLevel, id, req.sekolah_id]
     );
     await connection.end();
 
@@ -3749,7 +3768,7 @@ app.delete(
 
       // Cek apakah mata pelajaran masih digunakan di jadwal_pelajaran
       const [jadwal] = await connection.execute(
-        "SELECT id FROM jadwal_pelajaran WHERE mata_pelajaran_id = ?",
+        "SELECT id FROM jadwal_mengajar WHERE mata_pelajaran_id = ?",
         [id]
       );
 
@@ -8776,59 +8795,43 @@ app.get("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
 });
 
 // Get semua pengumuman
+// Get Pengumuman dengan filter berdasarkan role
 app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log(
-      "Mengambil data pengumuman untuk sekolah:",
-      req.sekolah_id,
-      "user role:",
-      req.user.role
-    );
-
+    console.log(`Mengambil data pengumuman untuk sekolah: ${req.sekolah_id} user role: ${req.user.role}`);
+    
     const connection = await getConnection();
+    
     let query = `
-      SELECT 
-        p.*,
+      SELECT p.*, 
         u.nama as pembuat_nama,
-        k.nama as kelas_nama,
         u.role as pembuat_role
       FROM pengumuman p
       JOIN users u ON p.pembuat_id = u.id
-      LEFT JOIN kelas k ON p.kelas_id = k.id AND k.sekolah_id = ?
       WHERE p.sekolah_id = ?
     `;
+    let params = [req.sekolah_id];
 
-    const params = [req.sekolah_id, req.sekolah_id];
-
-    // Jika bukan admin, filter berdasarkan role dan kelas
-    if (req.user.role !== "admin") {
-      query += ` AND (
-        p.role_target = 'all' 
-        OR p.role_target = ?
-        OR (p.kelas_id IS NULL AND p.role_target = ?)
-      `;
-      params.push(req.user.role, req.user.role);
-
-      // Jika user adalah siswa atau wali, tambahkan filter kelas
-      if (req.user.role === "siswa" || req.user.role === "wali") {
-        query += ` OR p.kelas_id IN (SELECT kelas_id FROM siswa WHERE user_id = ?)`;
-        params.push(req.user.id);
-      }
-
-      query += `)`;
+    // Filter berdasarkan role user
+    if (req.user.role === 'wali') {
+      // Untuk wali, hanya tampilkan pengumuman yang ditujukan untuk wali atau semua
+      query += ` AND (p.role_target LIKE 'wali' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
+    } else if (req.user.role === 'guru') {
+      // Untuk guru, tampilkan pengumuman untuk guru atau semua
+      query += ` AND (p.role_target LIKE 'guru' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
+    } else if (req.user.role === 'siswa') {
+      // Untuk siswa, tampilkan pengumuman untuk siswa atau semua
+      query += ` AND (p.role_target LIKE 'siswa' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
     }
+    // Untuk admin dan super_admin, tampilkan semua pengumuman
 
-    query += ` ORDER BY 
-        CASE WHEN p.prioritas = 'penting' THEN 1 ELSE 2 END,
-        p.created_at DESC`;
+    // query += ` AND (p.tanggal_akhir >= CURDATE() OR p.tanggal_akhir IS NULL)`;
+    // query += ` ORDER BY p.created_at DESC`;
 
     const [pengumuman] = await connection.execute(query, params);
     await connection.end();
 
-    console.log(
-      "Berhasil mengambil data pengumuman, jumlah:",
-      pengumuman.length
-    );
+    console.log("Berhasil mengambil data pengumuman, jumlah:", pengumuman.length);
     res.json(pengumuman);
   } catch (error) {
     console.error("ERROR GET PENGUMUMAN:", error.message);
