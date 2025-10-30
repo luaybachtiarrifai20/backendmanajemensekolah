@@ -21,6 +21,7 @@ const dbConfig = {
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT || 3306, // default value jika tidak ada
+  timezone: '+07:00', // Set timezone to Asia/Jakarta (WIB)
 };
 
 const JWT_SECRET = "secret_key_yang_aman_dan_unik";
@@ -4424,18 +4425,28 @@ app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
 
     let query = `
       SELECT 
-        a.*, 
+        a.id,
+        a.siswa_id,
+        a.guru_id,
+        a.mata_pelajaran_id,
+        a.kelas_id,
+        a.sekolah_id,
+        DATE_FORMAT(a.tanggal, '%Y-%m-%d') as tanggal,
+        a.status,
+        a.keterangan,
+        a.created_at,
+        a.updated_at,
         s.nama as siswa_nama, 
         s.nis, 
         k.nama as kelas_nama, 
         k.id as kelas_id, 
         mp.nama as mata_pelajaran_nama,
-        u.nama as guru_nama  -- PERUBAHAN: g.nama -> u.nama
+        u.nama as guru_nama
       FROM absensi a
       JOIN siswa s ON a.siswa_id = s.id
       JOIN kelas k ON s.kelas_id = k.id
       JOIN mata_pelajaran mp ON a.mata_pelajaran_id = mp.id
-      LEFT JOIN users u ON a.guru_id = u.id AND u.role = 'guru'  -- PERUBAHAN: guru -> users
+      LEFT JOIN users u ON a.guru_id = u.id AND u.role = 'guru'
       WHERE s.sekolah_id = ? AND mp.sekolah_id = ?
     `;
     let params = [req.sekolah_id, req.sekolah_id];
@@ -4784,7 +4795,7 @@ app.get("/api/debug/absensi-data", authenticateToken, async (req, res) => {
   try {
     const connection = await getConnection();
     const [absensi] = await connection.execute(
-      "SELECT * FROM absensi LIMIT 10"
+      "SELECT id, siswa_id, guru_id, mata_pelajaran_id, kelas_id, sekolah_id, DATE_FORMAT(tanggal, '%Y-%m-%d') as tanggal, status, keterangan, created_at, updated_at FROM absensi LIMIT 10"
     );
     await connection.end();
     res.json({ absensi });
@@ -4802,6 +4813,7 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
       siswa_id,
       guru_id,
       mata_pelajaran_id,
+      kelas_id,
       tanggal,
       status,
       keterangan,
@@ -4812,6 +4824,7 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
     if (!siswa_id) missingFields.push("siswa_id");
     if (!guru_id) missingFields.push("guru_id");
     if (!mata_pelajaran_id) missingFields.push("mata_pelajaran_id");
+    if (!kelas_id) missingFields.push("kelas_id");
     if (!tanggal) missingFields.push("tanggal");
     if (!status) missingFields.push("status");
 
@@ -4883,8 +4896,8 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
     if (existing.length > 0) {
       // Update jika sudah ada
       await connection.execute(
-        "UPDATE absensi SET status = ?, keterangan = ?, updated_at = NOW() WHERE id = ?",
-        [status, keterangan || "", existing[0].id]
+        "UPDATE absensi SET status = ?, keterangan = ?, kelas_id = ?, sekolah_id = ?, updated_at = NOW() WHERE id = ?",
+        [status, keterangan || "", kelas_id, req.sekolah_id, existing[0].id]
       );
       await connection.end();
       console.log("Absensi berhasil diupdate:", existing[0].id);
@@ -4896,12 +4909,14 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
     } else {
       // Insert baru
       await connection.execute(
-        "INSERT INTO absensi (id, siswa_id, guru_id, mata_pelajaran_id, tanggal, status, keterangan) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO absensi (id, siswa_id, guru_id, mata_pelajaran_id, kelas_id, sekolah_id, tanggal, status, keterangan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           id,
           siswa_id,
           guru_id,
           mata_pelajaran_id,
+          kelas_id,
+          req.sekolah_id,
           tanggal,
           status,
           keterangan || "",
