@@ -5172,7 +5172,8 @@ app.post("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
     }
 
     const [nilaiExist] = await connection.execute(
-      "SELECT id FROM nilai WHERE id = ? AND sekolah_id = ?"
+      "SELECT id FROM nilai WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
     );
     if (nilaiExist.length > 0) {
       await connection.end();
@@ -5242,7 +5243,7 @@ app.put("/api/nilai/:id", authenticateTokenAndSchool, async (req, res) => {
        FROM nilai n
        JOIN siswa s ON n.siswa_id = s.id
        JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id
-       WHERE n.id = ? AND s.sekolah_id = ? AND mp.sekolah_id = ?, AND n.sekolah_id = ?`,
+       WHERE n.id = ? AND s.sekolah_id = ? AND mp.sekolah_id = ? AND n.sekolah_id = ?`,
       [id, req.sekolah_id, req.sekolah_id, req.sekolah_id]
     );
 
