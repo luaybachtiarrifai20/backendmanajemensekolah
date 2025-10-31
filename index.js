@@ -8333,6 +8333,147 @@ app.put("/api/rpp/:id/status", authenticateTokenAndSchool, async (req, res) => {
   }
 });
 
+// Update RPP (edit full data)
+app.put("/api/rpp/:id", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Update RPP:", id, req.body);
+    const {
+      mata_pelajaran_id,
+      kelas_id,
+      judul,
+      semester,
+      tahun_ajaran,
+      kompetensi_inti,
+      kompetensi_dasar,
+      indikator,
+      tujuan_pembelajaran,
+      materi_pokok,
+      metode_pembelajaran,
+      media_alat,
+      sumber_belajar,
+      kegiatan_pembelajaran,
+      penilaian,
+      file_path,
+    } = req.body;
+
+    // Validasi field required
+    if (!mata_pelajaran_id || !judul || !semester || !tahun_ajaran) {
+      return res.status(400).json({
+        error: "Data tidak lengkap",
+        required: ["mata_pelajaran_id", "judul", "semester", "tahun_ajaran"],
+      });
+    }
+
+    const connection = await getConnection();
+
+    // Cek apakah RPP termasuk dalam sekolah yang sama
+    const [rppCheck] = await connection.execute(
+      "SELECT id, guru_id FROM rpp WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
+    );
+
+    if (rppCheck.length === 0) {
+      await connection.end();
+      return res
+        .status(404)
+        .json({ error: "RPP tidak ditemukan atau tidak memiliki akses" });
+    }
+
+    // Cek apakah mata pelajaran termasuk dalam sekolah yang sama
+    const [mapelCheck] = await connection.execute(
+      "SELECT id FROM mata_pelajaran WHERE id = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, req.sekolah_id]
+    );
+
+    if (mapelCheck.length === 0) {
+      await connection.end();
+      return res.status(404).json({
+        error: "Mata pelajaran tidak ditemukan atau tidak memiliki akses",
+      });
+    }
+
+    // Cek apakah kelas termasuk dalam sekolah yang sama (jika ada kelas_id)
+    if (kelas_id) {
+      const [kelasCheck] = await connection.execute(
+        "SELECT id FROM kelas WHERE id = ? AND sekolah_id = ?",
+        [kelas_id, req.sekolah_id]
+      );
+
+      if (kelasCheck.length === 0) {
+        await connection.end();
+        return res
+          .status(404)
+          .json({ error: "Kelas tidak ditemukan atau tidak memiliki akses" });
+      }
+    }
+
+    // Handle undefined values by converting them to null
+    const cleanKelasId = kelas_id || null;
+    const cleanKompetensiInti = kompetensi_inti || null;
+    const cleanKompetensiDasar = kompetensi_dasar || null;
+    const cleanIndikator = indikator || null;
+    const cleanTujuanPembelajaran = tujuan_pembelajaran || null;
+    const cleanMateriPokok = materi_pokok || null;
+    const cleanMetodePembelajaran = metode_pembelajaran || null;
+    const cleanMediaAlat = media_alat || null;
+    const cleanSumberBelajar = sumber_belajar || null;
+    const cleanKegiatanPembelajaran = kegiatan_pembelajaran || null;
+    const cleanPenilaian = penilaian || null;
+    const cleanFilePath = file_path || null;
+
+    await connection.execute(
+      `UPDATE rpp SET 
+        mata_pelajaran_id = ?,
+        kelas_id = ?,
+        judul = ?,
+        semester = ?,
+        tahun_ajaran = ?,
+        kompetensi_inti = ?,
+        kompetensi_dasar = ?,
+        indikator = ?,
+        tujuan_pembelajaran = ?,
+        materi_pokok = ?,
+        metode_pembelajaran = ?,
+        media_alat = ?,
+        sumber_belajar = ?,
+        kegiatan_pembelajaran = ?,
+        penilaian = ?,
+        file_path = ?,
+        updated_at = NOW()
+      WHERE id = ? AND sekolah_id = ?`,
+      [
+        mata_pelajaran_id,
+        cleanKelasId,
+        judul,
+        semester,
+        tahun_ajaran,
+        cleanKompetensiInti,
+        cleanKompetensiDasar,
+        cleanIndikator,
+        cleanTujuanPembelajaran,
+        cleanMateriPokok,
+        cleanMetodePembelajaran,
+        cleanMediaAlat,
+        cleanSumberBelajar,
+        cleanKegiatanPembelajaran,
+        cleanPenilaian,
+        cleanFilePath,
+        id,
+        req.sekolah_id,
+      ]
+    );
+    await connection.end();
+
+    console.log("RPP berhasil diupdate:", id);
+    res.json({ message: "RPP berhasil diupdate" });
+  } catch (error) {
+    console.error("ERROR UPDATE RPP:", error.message);
+    console.error("Error details:", error);
+    res.status(500).json({ error: "Gagal mengupdate RPP: " + error.message });
+  }
+});
+
 // Delete RPP
 app.delete("/api/rpp/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
