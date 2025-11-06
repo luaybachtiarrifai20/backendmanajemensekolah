@@ -5467,6 +5467,160 @@ app.get("/api/konten-materi", authenticateToken, async (req, res) => {
   }
 });
 
+// ==================== MATERI PROGRESS ENDPOINTS ====================
+
+// Get Materi Progress (checked state) for a teacher and subject
+app.get("/api/materi-progress", authenticateToken, async (req, res) => {
+  try {
+    const { guru_id, mata_pelajaran_id } = req.query;
+    console.log("Mengambil data progress materi");
+
+    if (!guru_id || !mata_pelajaran_id) {
+      return res.status(400).json({ 
+        error: "Parameter guru_id dan mata_pelajaran_id diperlukan" 
+      });
+    }
+
+    const connection = await getConnection();
+    const [progress] = await connection.execute(
+      `SELECT * FROM materi_progress 
+       WHERE guru_id = ? AND mata_pelajaran_id = ? AND is_checked = TRUE`,
+      [guru_id, mata_pelajaran_id]
+    );
+    await connection.end();
+
+    console.log("Berhasil mengambil data progress materi, jumlah:", progress.length);
+    res.json(progress);
+  } catch (error) {
+    console.error("ERROR GET MATERI PROGRESS:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data progress materi" });
+  }
+});
+
+// Save or Update Materi Progress (toggle checked state)
+app.post("/api/materi-progress", authenticateToken, async (req, res) => {
+  try {
+    console.log("Menyimpan progress materi:", req.body);
+    const { guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked } = req.body;
+
+    if (!guru_id || !mata_pelajaran_id) {
+      return res.status(400).json({ 
+        error: "Parameter guru_id dan mata_pelajaran_id diperlukan" 
+      });
+    }
+
+    // At least bab_id must be provided
+    if (!bab_id) {
+      return res.status(400).json({ 
+        error: "Parameter bab_id diperlukan" 
+      });
+    }
+
+    const connection = await getConnection();
+    
+    // Check if record already exists
+    const [existing] = await connection.execute(
+      `SELECT * FROM materi_progress 
+       WHERE guru_id = ? AND mata_pelajaran_id = ? 
+       AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
+      [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+    );
+
+    if (existing.length > 0) {
+      // Update existing record
+      await connection.execute(
+        `UPDATE materi_progress 
+         SET is_checked = ?, updated_at = CURRENT_TIMESTAMP 
+         WHERE guru_id = ? AND mata_pelajaran_id = ? 
+         AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
+        [is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+      );
+      console.log("Progress materi berhasil diupdate");
+    } else {
+      // Insert new record
+      await connection.execute(
+        `INSERT INTO materi_progress 
+         (guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked) 
+         VALUES (?, ?, ?, ?, ?)`,
+        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, is_checked]
+      );
+      console.log("Progress materi berhasil ditambahkan");
+    }
+    
+    await connection.end();
+    res.json({ 
+      message: "Progress materi berhasil disimpan",
+      is_checked: is_checked 
+    });
+  } catch (error) {
+    console.error("ERROR SAVE MATERI PROGRESS:", error.message);
+    console.error("SQL Error code:", error.code);
+    res.status(500).json({ error: "Gagal menyimpan progress materi" });
+  }
+});
+
+// Batch save materi progress (for saving multiple checkboxes at once)
+app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
+  try {
+    console.log("Menyimpan batch progress materi:", req.body);
+    const { guru_id, mata_pelajaran_id, progress_items } = req.body;
+
+    if (!guru_id || !mata_pelajaran_id || !progress_items || !Array.isArray(progress_items)) {
+      return res.status(400).json({ 
+        error: "Parameter guru_id, mata_pelajaran_id, dan progress_items diperlukan" 
+      });
+    }
+
+    const connection = await getConnection();
+    
+    // Process each item
+    for (const item of progress_items) {
+      const { bab_id, sub_bab_id, is_checked } = item;
+      
+      if (!bab_id) continue; // Skip invalid items
+      
+      // Check if record exists
+      const [existing] = await connection.execute(
+        `SELECT * FROM materi_progress 
+         WHERE guru_id = ? AND mata_pelajaran_id = ? 
+         AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
+        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+      );
+
+      if (existing.length > 0) {
+        // Update
+        await connection.execute(
+          `UPDATE materi_progress 
+           SET is_checked = ?, updated_at = CURRENT_TIMESTAMP 
+           WHERE guru_id = ? AND mata_pelajaran_id = ? 
+           AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
+          [is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+        );
+      } else {
+        // Insert
+        await connection.execute(
+          `INSERT INTO materi_progress 
+           (guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked) 
+           VALUES (?, ?, ?, ?, ?)`,
+          [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, is_checked]
+        );
+      }
+    }
+    
+    await connection.end();
+    console.log(`Batch progress materi berhasil disimpan, jumlah: ${progress_items.length}`);
+    res.json({ 
+      message: "Batch progress materi berhasil disimpan",
+      count: progress_items.length 
+    });
+  } catch (error) {
+    console.error("ERROR BATCH SAVE MATERI PROGRESS:", error.message);
+    res.status(500).json({ error: "Gagal menyimpan batch progress materi" });
+  }
+});
+
+// ==================== END MATERI PROGRESS ENDPOINTS ====================
+
 // Create Bab Materi
 app.post("/api/bab-materi", authenticateToken, async (req, res) => {
   try {
