@@ -5528,20 +5528,21 @@ app.post("/api/materi-progress", authenticateToken, async (req, res) => {
 
     if (existing.length > 0) {
       // Update existing record
+      // If unchecked (is_checked = false), also reset is_generated to false
       await connection.execute(
         `UPDATE materi_progress 
-         SET is_checked = ?, updated_at = CURRENT_TIMESTAMP 
+         SET is_checked = ?, is_generated = IF(? = FALSE, FALSE, is_generated), updated_at = CURRENT_TIMESTAMP 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+        [is_checked, is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
       );
       console.log("Progress materi berhasil diupdate");
     } else {
       // Insert new record
       await connection.execute(
         `INSERT INTO materi_progress 
-         (guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked) 
-         VALUES (?, ?, ?, ?, ?)`,
+         (guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked, is_generated) 
+         VALUES (?, ?, ?, ?, ?, FALSE)`,
         [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, is_checked]
       );
       console.log("Progress materi berhasil ditambahkan");
@@ -5589,19 +5590,20 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
 
       if (existing.length > 0) {
         // Update
+        // If unchecked (is_checked = false), also reset is_generated to false
         await connection.execute(
           `UPDATE materi_progress 
-           SET is_checked = ?, updated_at = CURRENT_TIMESTAMP 
+           SET is_checked = ?, is_generated = IF(? = FALSE, FALSE, is_generated), updated_at = CURRENT_TIMESTAMP 
            WHERE guru_id = ? AND mata_pelajaran_id = ? 
            AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-          [is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+          [is_checked, is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
         );
       } else {
         // Insert
         await connection.execute(
           `INSERT INTO materi_progress 
-           (guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked) 
-           VALUES (?, ?, ?, ?, ?)`,
+           (guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked, is_generated) 
+           VALUES (?, ?, ?, ?, ?, FALSE)`,
           [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, is_checked]
         );
       }
@@ -5616,6 +5618,89 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("ERROR BATCH SAVE MATERI PROGRESS:", error.message);
     res.status(500).json({ error: "Gagal menyimpan batch progress materi" });
+  }
+});
+
+// Mark materi as generated (when used for RPP/activity generation)
+app.post("/api/materi-progress/mark-generated", authenticateToken, async (req, res) => {
+  try {
+    console.log("Menandai materi sebagai sudah di-generate:", req.body);
+    const { guru_id, mata_pelajaran_id, items } = req.body;
+
+    if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
+      return res.status(400).json({ 
+        error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan" 
+      });
+    }
+
+    const connection = await getConnection();
+    
+    // Mark each item as generated
+    for (const item of items) {
+      const { bab_id, sub_bab_id } = item;
+      
+      if (!bab_id) continue;
+      
+      // Update the is_generated flag
+      await connection.execute(
+        `UPDATE materi_progress 
+         SET is_generated = TRUE, updated_at = CURRENT_TIMESTAMP 
+         WHERE guru_id = ? AND mata_pelajaran_id = ? 
+         AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
+        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+      );
+    }
+    
+    await connection.end();
+    console.log(`Materi berhasil ditandai sebagai generated, jumlah: ${items.length}`);
+    res.json({ 
+      message: "Materi berhasil ditandai sebagai sudah di-generate",
+      count: items.length 
+    });
+  } catch (error) {
+    console.error("ERROR MARK GENERATED:", error.message);
+    res.status(500).json({ error: "Gagal menandai materi sebagai generated" });
+  }
+});
+
+// Reset generated status (to allow regeneration)
+app.post("/api/materi-progress/reset-generated", authenticateToken, async (req, res) => {
+  try {
+    console.log("Reset status generated materi:", req.body);
+    const { guru_id, mata_pelajaran_id, items } = req.body;
+
+    if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
+      return res.status(400).json({ 
+        error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan" 
+      });
+    }
+
+    const connection = await getConnection();
+    
+    // Reset is_generated flag for each item
+    for (const item of items) {
+      const { bab_id, sub_bab_id } = item;
+      
+      if (!bab_id) continue;
+      
+      await connection.execute(
+        `UPDATE materi_progress 
+         SET is_generated = FALSE, updated_at = CURRENT_TIMESTAMP 
+         WHERE guru_id = ? AND mata_pelajaran_id = ? 
+         AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
+        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+      );
+    }
+    
+    await connection.end();
+    console.log(`Status generated berhasil di-reset, jumlah: ${items.length}`);
+    res.json({ 
+      message: "Status generated berhasil di-reset",
+      count: items.length 
+    });
+  } catch (error) {
+    console.error("ERROR RESET GENERATED:", error.message);
+    res.status(500).json({ error: "Gagal reset status generated" });
   }
 });
 

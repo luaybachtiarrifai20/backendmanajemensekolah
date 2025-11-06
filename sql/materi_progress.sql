@@ -13,6 +13,7 @@ CREATE TABLE materi_progress (
     bab_id VARCHAR(36) NULL,
     sub_bab_id VARCHAR(36) NULL,
     is_checked BOOLEAN DEFAULT FALSE,
+    is_generated BOOLEAN DEFAULT FALSE COMMENT 'Apakah materi sudah pernah di-generate untuk RPP/aktivitas',
     checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     
