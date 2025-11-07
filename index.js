@@ -9,10 +9,31 @@ const path = require("path");
 const XLSX = require("xlsx");
 const fs = require("fs");
 const cron = require("node-cron");
+const admin = require("firebase-admin");
 require("dotenv").config();
+
 const app = express();
 app.use(express.json());
 app.use(cors());
+
+// Firebase Admin SDK Configuration
+const FCM_ENABLED = process.env.FCM_ENABLED === 'true';
+const FCM_SERVICE_ACCOUNT_PATH = process.env.FCM_SERVICE_ACCOUNT_PATH;
+
+// Initialize Firebase Admin
+let firebaseInitialized = false;
+if (FCM_ENABLED && FCM_SERVICE_ACCOUNT_PATH) {
+  try {
+    const serviceAccount = require(FCM_SERVICE_ACCOUNT_PATH);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    firebaseInitialized = true;
+    console.log('✅ Firebase Admin SDK initialized');
+  } catch (error) {
+    console.error('❌ Firebase Admin SDK initialization error:', error.message);
+  }
+}
 
 // Konfigurasi database langsung (ganti dengan nilai yang sesuai)
 const dbConfig = {
@@ -170,6 +191,169 @@ const authenticateTokenAndSchool = async (req, res, next) => {
     return res.status(500).json({ error: "Gagal memverifikasi token" });
   }
 };
+
+// ==================== FCM HELPER FUNCTIONS ====================
+
+// Send FCM notification to single device
+async function sendFCMNotification(token, title, body, data = {}) {
+  if (!FCM_ENABLED || !firebaseInitialized) {
+    console.log('FCM disabled, skipping notification');
+    return { success: false, error: 'FCM not configured' };
+  }
+
+  const message = {
+    token: token,
+    notification: {
+      title: title,
+      body: body,
+    },
+    data: data,
+    android: {
+      priority: 'high',
+      notification: {
+        sound: 'default',
+        channelId: 'high_importance_channel',
+      }
+    },
+    apns: {
+      payload: {
+        aps: {
+          sound: 'default',
+          badge: 1,
+        }
+      }
+    }
+  };
+
+  try {
+    const response = await admin.messaging().send(message);
+    console.log('FCM Success:', response);
+    return { success: true, response: response };
+  } catch (error) {
+    console.error('FCM Send Error:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// Send FCM notification to multiple devices (batch)
+async function sendFCMNotificationBatch(tokens, title, body, data = {}) {
+  if (!FCM_ENABLED || !firebaseInitialized || tokens.length === 0) {
+    return { success: false, error: 'FCM not configured or no tokens' };
+  }
+
+  const message = {
+    notification: {
+      title: title,
+      body: body,
+    },
+    data: data,
+    android: {
+      priority: 'high',
+      notification: {
+        sound: 'default',
+        channelId: 'high_importance_channel',
+      }
+    },
+    apns: {
+      payload: {
+        aps: {
+          sound: 'default',
+          badge: 1,
+        }
+      }
+    },
+    tokens: tokens // Firebase Admin SDK supports up to 500 tokens per batch
+  };
+
+  try {
+    const response = await admin.messaging().sendMulticast(message);
+    console.log(`FCM Batch Success: ${response.successCount}/${tokens.length} sent`);
+    if (response.failureCount > 0) {
+      console.log('Failed tokens:', response.responses
+        .map((r, idx) => r.success ? null : tokens[idx])
+        .filter(t => t !== null)
+      );
+    }
+    return { success: true, response: response };
+  } catch (error) {
+    console.error('FCM Batch Send Error:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// Log notification to database
+async function logNotification(connection, userId, title, body, type, referenceId, fcmResponse, isSent) {
+  try {
+    const logId = crypto.randomUUID();
+    await connection.execute(
+      `INSERT INTO notification_logs 
+       (id, user_id, title, body, type, reference_id, fcm_response, is_sent, sent_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        logId, 
+        userId, 
+        title, 
+        body, 
+        type, 
+        referenceId, 
+        JSON.stringify(fcmResponse), 
+        isSent,
+        isSent ? new Date() : null
+      ]
+    );
+    return logId;
+  } catch (error) {
+    console.error('Error logging notification:', error);
+    return null;
+  }
+}
+
+// Send notification to all wali murid of siswa in specific kelas
+async function sendNotificationToKelas(connection, kelasId, title, body, type, referenceId) {
+  try {
+    // Get all wali murid tokens for siswa in this kelas
+    const [tokens] = await connection.execute(
+      `SELECT DISTINCT ft.token, ft.user_id
+       FROM fcm_tokens ft
+       JOIN users u ON ft.user_id = u.id
+       JOIN siswa s ON u.siswa_id = s.id
+       WHERE s.kelas_id = ? AND ft.is_active = TRUE AND u.role = 'wali'`,
+      [kelasId]
+    );
+
+    if (tokens.length === 0) {
+      console.log('No FCM tokens found for kelas:', kelasId);
+      return { success: false, count: 0 };
+    }
+
+    const tokenList = tokens.map(t => t.token);
+    const result = await sendFCMNotificationBatch(
+      tokenList, 
+      title, 
+      body, 
+      { type, reference_id: referenceId }
+    );
+
+    // Log each notification
+    for (const tokenData of tokens) {
+      await logNotification(
+        connection,
+        tokenData.user_id,
+        title,
+        body,
+        type,
+        referenceId,
+        result.response,
+        result.success
+      );
+    }
+
+    return { success: true, count: tokens.length, result };
+  } catch (error) {
+    console.error('Error sending notification to kelas:', error);
+    return { success: false, error: error.message };
+  }
+}
 
 // Konfigurasi storage untuk multer - PERBAIKI INI
 const storage = multer.diskStorage({
@@ -10314,6 +10498,24 @@ async function generateTagihanOtomatis() {
           );
 
           console.log(`Tagihan dibuat: ${tagihanId} untuk siswa ${siswa.id}`);
+          
+          // Get kelas_id untuk siswa ini
+          const [siswaData] = await connection.execute(
+            "SELECT kelas_id FROM siswa WHERE id = ?",
+            [siswa.id]
+          );
+          
+          if (siswaData.length > 0 && siswaData[0].kelas_id) {
+            // Send notification to all wali murid in this kelas
+            await sendNotificationToKelas(
+              connection,
+              siswaData[0].kelas_id,
+              'Tagihan Baru',
+              `Tagihan ${jenis.nama} sebesar Rp ${jenis.jumlah.toLocaleString()} telah dibuat`,
+              'tagihan',
+              tagihanId
+            );
+          }
         }
       }
     }
@@ -11019,6 +11221,159 @@ app.get("/api/health", async (req, res) => {
       database: "Disconnected",
       error: error.message,
     });
+  }
+});
+
+// ==================== FCM TOKEN ENDPOINTS ====================
+
+// Register or update FCM token
+app.post("/api/fcm/register", authenticateToken, async (req, res) => {
+  try {
+    const { token, device_type, device_info } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({ error: "FCM token is required" });
+    }
+    
+    const connection = await getConnection();
+    
+    // Check if token already exists for this user
+    const [existing] = await connection.execute(
+      "SELECT id FROM fcm_tokens WHERE user_id = ? AND token = ?",
+      [req.user.id, token]
+    );
+    
+    if (existing.length > 0) {
+      // Update existing token
+      await connection.execute(
+        `UPDATE fcm_tokens 
+         SET is_active = TRUE, device_type = ?, device_info = ?, 
+             last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [device_type || 'android', device_info, existing[0].id]
+      );
+      
+      await connection.end();
+      return res.json({ 
+        message: "FCM token updated successfully",
+        token_id: existing[0].id 
+      });
+    }
+    
+    // Create new token
+    const tokenId = crypto.randomUUID();
+    await connection.execute(
+      `INSERT INTO fcm_tokens (id, user_id, token, device_type, device_info, is_active)
+       VALUES (?, ?, ?, ?, ?, TRUE)`,
+      [tokenId, req.user.id, token, device_type || 'android', device_info]
+    );
+    
+    await connection.end();
+    console.log(`FCM token registered for user ${req.user.id}`);
+    
+    res.json({ 
+      message: "FCM token registered successfully",
+      token_id: tokenId 
+    });
+  } catch (error) {
+    console.error("ERROR REGISTER FCM TOKEN:", error.message);
+    res.status(500).json({ error: "Failed to register FCM token" });
+  }
+});
+
+// Unregister FCM token (logout dari device tertentu)
+app.post("/api/fcm/unregister", authenticateToken, async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({ error: "FCM token is required" });
+    }
+    
+    const connection = await getConnection();
+    
+    await connection.execute(
+      "UPDATE fcm_tokens SET is_active = FALSE WHERE user_id = ? AND token = ?",
+      [req.user.id, token]
+    );
+    
+    await connection.end();
+    console.log(`FCM token unregistered for user ${req.user.id}`);
+    
+    res.json({ message: "FCM token unregistered successfully" });
+  } catch (error) {
+    console.error("ERROR UNREGISTER FCM TOKEN:", error.message);
+    res.status(500).json({ error: "Failed to unregister FCM token" });
+  }
+});
+
+// Test send notification (untuk testing)
+app.post("/api/fcm/test", authenticateToken, async (req, res) => {
+  try {
+    const { title, body } = req.body;
+    
+    const connection = await getConnection();
+    
+    // Get user's active tokens
+    const [tokens] = await connection.execute(
+      "SELECT token FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
+      [req.user.id]
+    );
+    
+    if (tokens.length === 0) {
+      await connection.end();
+      return res.status(404).json({ error: "No active FCM tokens found for user" });
+    }
+    
+    const result = await sendFCMNotification(
+      tokens[0].token,
+      title || 'Test Notification',
+      body || 'This is a test notification from Manajemen Sekolah',
+      { type: 'test' }
+    );
+    
+    await logNotification(
+      connection,
+      req.user.id,
+      title || 'Test Notification',
+      body || 'This is a test notification',
+      'general',
+      null,
+      result.response,
+      result.success
+    );
+    
+    await connection.end();
+    
+    res.json({ 
+      message: "Test notification sent",
+      result: result 
+    });
+  } catch (error) {
+    console.error("ERROR SEND TEST NOTIFICATION:", error.message);
+    res.status(500).json({ error: "Failed to send test notification" });
+  }
+});
+
+// Get notification logs for user
+app.get("/api/notifications/history", authenticateToken, async (req, res) => {
+  try {
+    const connection = await getConnection();
+    
+    const [notifications] = await connection.execute(
+      `SELECT id, title, body, type, reference_id, is_sent, sent_at, created_at
+       FROM notification_logs
+       WHERE user_id = ?
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [req.user.id]
+    );
+    
+    await connection.end();
+    res.json(notifications);
+  } catch (error) {
+    console.error("ERROR GET NOTIFICATION HISTORY:", error.message);
+    res.status(500).json({ error: "Failed to get notification history" });
   }
 });
 
