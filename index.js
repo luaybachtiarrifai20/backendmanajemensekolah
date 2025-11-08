@@ -311,9 +311,12 @@ async function logNotification(connection, userId, title, body, type, referenceI
 // Send notification to all wali murid of siswa in specific kelas
 async function sendNotificationToKelas(connection, kelasId, title, body, type, referenceId) {
   try {
+    console.log(`📤 Attempting to send notification to kelas: ${kelasId}`);
+    console.log(`   Title: ${title}, Type: ${type}`);
+    
     // Get all wali murid tokens for siswa in this kelas
     const [tokens] = await connection.execute(
-      `SELECT DISTINCT ft.token, ft.user_id
+      `SELECT DISTINCT ft.token, ft.user_id, u.nama as user_nama
        FROM fcm_tokens ft
        JOIN users u ON ft.user_id = u.id
        JOIN siswa s ON u.siswa_id = s.id
@@ -321,10 +324,17 @@ async function sendNotificationToKelas(connection, kelasId, title, body, type, r
       [kelasId]
     );
 
+    console.log(`📊 Found ${tokens.length} FCM tokens for kelas ${kelasId}`);
+    
     if (tokens.length === 0) {
-      console.log('No FCM tokens found for kelas:', kelasId);
+      console.log('⚠️ No FCM tokens found for kelas:', kelasId);
+      console.log('💡 Wali murid belum login atau FCM token belum terdaftar');
       return { success: false, count: 0 };
     }
+
+    tokens.forEach((t, i) => {
+      console.log(`   ${i+1}. ${t.user_nama} (Token: ${t.token.substring(0, 20)}...)`);
+    });
 
     const tokenList = tokens.map(t => t.token);
     const result = await sendFCMNotificationBatch(
@@ -333,6 +343,12 @@ async function sendNotificationToKelas(connection, kelasId, title, body, type, r
       body, 
       { type, reference_id: referenceId }
     );
+
+    if (result.success) {
+      console.log(`✅ Notification sent successfully to ${tokens.length} wali murid`);
+    } else {
+      console.log(`❌ Failed to send notification: ${result.error}`);
+    }
 
     // Log each notification
     for (const tokenData of tokens) {
@@ -343,14 +359,14 @@ async function sendNotificationToKelas(connection, kelasId, title, body, type, r
         body,
         type,
         referenceId,
-        result.response,
+        JSON.stringify(result.response),
         result.success
       );
     }
 
     return { success: true, count: tokens.length, result };
   } catch (error) {
-    console.error('Error sending notification to kelas:', error);
+    console.error('❌ Error sending notification to kelas:', error);
     return { success: false, error: error.message };
   }
 }
@@ -11374,6 +11390,94 @@ app.get("/api/notifications/history", authenticateToken, async (req, res) => {
   } catch (error) {
     console.error("ERROR GET NOTIFICATION HISTORY:", error.message);
     res.status(500).json({ error: "Failed to get notification history" });
+  }
+});
+
+// Check unpaid tagihan on login and send notification
+app.post("/api/notifications/check-unpaid-tagihan", authenticateToken, async (req, res) => {
+  try {
+    const connection = await getConnection();
+    
+    // Only for wali murid
+    const [user] = await connection.execute(
+      "SELECT role, siswa_id FROM users WHERE id = ?",
+      [req.user.id]
+    );
+    
+    if (user.length === 0 || user[0].role !== 'wali') {
+      await connection.end();
+      return res.json({ message: "Not a wali murid", unpaidCount: 0 });
+    }
+    
+    // Get unpaid tagihan for this wali's siswa
+    const [unpaidTagihan] = await connection.execute(
+      `SELECT 
+        t.id,
+        t.jumlah,
+        jp.nama as jenis_pembayaran,
+        t.jatuh_tempo
+       FROM tagihan t
+       JOIN jenis_pembayaran jp ON t.jenis_pembayaran_id = jp.id
+       LEFT JOIN pembayaran p ON t.id = p.tagihan_id AND p.status = 'verified'
+       WHERE t.siswa_id = ? AND p.id IS NULL
+       ORDER BY t.jatuh_tempo ASC`,
+      [user[0].siswa_id]
+    );
+    
+    console.log(`📋 Found ${unpaidTagihan.length} unpaid tagihan for user ${req.user.id}`);
+    
+    if (unpaidTagihan.length > 0) {
+      // Get user's FCM tokens
+      const [tokens] = await connection.execute(
+        "SELECT token FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
+        [req.user.id]
+      );
+      
+      if (tokens.length > 0) {
+        // Calculate total unpaid
+        const totalUnpaid = unpaidTagihan.reduce((sum, t) => sum + parseFloat(t.jumlah), 0);
+        
+        // Send notification
+        const title = 'Tagihan Belum Dibayar';
+        const body = `Anda memiliki ${unpaidTagihan.length} tagihan yang belum dibayar dengan total Rp ${totalUnpaid.toLocaleString()}`;
+        
+        const tokenList = tokens.map(t => t.token);
+        const result = await sendFCMNotificationBatch(
+          tokenList,
+          title,
+          body,
+          { 
+            type: 'tagihan_reminder',
+            unpaid_count: unpaidTagihan.length,
+            total_amount: totalUnpaid
+          }
+        );
+        
+        // Log notification
+        await logNotification(
+          connection,
+          req.user.id,
+          title,
+          body,
+          'tagihan_reminder',
+          null,
+          JSON.stringify(result.response),
+          result.success
+        );
+        
+        console.log(`✅ Sent unpaid tagihan notification to user ${req.user.id}`);
+      }
+    }
+    
+    await connection.end();
+    res.json({ 
+      message: "Checked unpaid tagihan",
+      unpaidCount: unpaidTagihan.length,
+      unpaidTagihan: unpaidTagihan
+    });
+  } catch (error) {
+    console.error("ERROR CHECK UNPAID TAGIHAN:", error.message);
+    res.status(500).json({ error: "Failed to check unpaid tagihan" });
   }
 });
 
