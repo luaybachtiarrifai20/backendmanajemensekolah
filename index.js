@@ -11433,6 +11433,13 @@ app.post("/api/notifications/check-unpaid-tagihan", authenticateToken, async (re
         [req.user.id]
       );
       
+      console.log(`📱 Found ${tokens.length} FCM tokens for user ${req.user.id}`);
+      
+      if (tokens.length === 0) {
+        console.log('⚠️ No FCM tokens found for this user');
+        console.log('💡 User needs to login via Flutter app and get APNS token first');
+      }
+      
       if (tokens.length > 0) {
         // Calculate total unpaid
         const totalUnpaid = unpaidTagihan.reduce((sum, t) => sum + parseFloat(t.jumlah), 0);
