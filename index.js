@@ -19,20 +19,42 @@ app.use(cors());
 // Firebase Admin SDK Configuration
 const FCM_ENABLED = process.env.FCM_ENABLED === 'true';
 const FCM_SERVICE_ACCOUNT_PATH = process.env.FCM_SERVICE_ACCOUNT_PATH;
+const FCM_SERVICE_ACCOUNT = process.env.FCM_SERVICE_ACCOUNT; // Full JSON as string
 
 // Initialize Firebase Admin
 let firebaseInitialized = false;
-if (FCM_ENABLED && FCM_SERVICE_ACCOUNT_PATH) {
+if (FCM_ENABLED) {
   try {
-    const serviceAccount = require(FCM_SERVICE_ACCOUNT_PATH);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    firebaseInitialized = true;
-    console.log('✅ Firebase Admin SDK initialized');
+    let serviceAccount;
+    
+    // Try to load from environment variable first (for Vercel)
+    if (FCM_SERVICE_ACCOUNT) {
+      console.log('📱 Loading Firebase service account from environment variable');
+      serviceAccount = JSON.parse(FCM_SERVICE_ACCOUNT);
+    } 
+    // Fallback to file path (for local development)
+    else if (FCM_SERVICE_ACCOUNT_PATH) {
+      console.log('📱 Loading Firebase service account from file:', FCM_SERVICE_ACCOUNT_PATH);
+      serviceAccount = require(FCM_SERVICE_ACCOUNT_PATH);
+    }
+    
+    if (serviceAccount) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      firebaseInitialized = true;
+      console.log('✅ Firebase Admin SDK initialized successfully');
+      console.log('📧 Project ID:', serviceAccount.project_id);
+    } else {
+      console.error('❌ No Firebase service account found');
+      console.error('💡 Set FCM_SERVICE_ACCOUNT env var or FCM_SERVICE_ACCOUNT_PATH');
+    }
   } catch (error) {
     console.error('❌ Firebase Admin SDK initialization error:', error.message);
+    console.error('💡 Check your serviceAccountKey.json or FCM_SERVICE_ACCOUNT env var');
   }
+} else {
+  console.log('⚠️ FCM is disabled (FCM_ENABLED=false or not set)');
 }
 
 // Konfigurasi database langsung (ganti dengan nilai yang sesuai)
@@ -285,6 +307,13 @@ async function sendFCMNotificationBatch(tokens, title, body, data = {}) {
 async function logNotification(connection, userId, title, body, type, referenceId, fcmResponse, isSent) {
   try {
     const logId = crypto.randomUUID();
+    
+    // Handle undefined values
+    const safeReferenceId = referenceId || null;
+    const safeFcmResponse = fcmResponse ? JSON.stringify(fcmResponse) : null;
+    const safeIsSent = isSent === true || isSent === 1 ? 1 : 0;
+    const safeSentAt = safeIsSent ? new Date() : null;
+    
     await connection.execute(
       `INSERT INTO notification_logs 
        (id, user_id, title, body, type, reference_id, fcm_response, is_sent, sent_at) 
@@ -295,10 +324,10 @@ async function logNotification(connection, userId, title, body, type, referenceI
         title, 
         body, 
         type, 
-        referenceId, 
-        JSON.stringify(fcmResponse), 
-        isSent,
-        isSent ? new Date() : null
+        safeReferenceId, 
+        safeFcmResponse, 
+        safeIsSent,
+        safeSentAt
       ]
     );
     return logId;
