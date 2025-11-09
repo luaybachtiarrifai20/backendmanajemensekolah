@@ -11476,12 +11476,30 @@ app.post("/api/notifications/check-unpaid-tagihan", authenticateToken, async (re
       }
     }
     
-    await connection.end();
-    res.json({ 
+    // Build response with notification status
+    const response = {
       message: "Checked unpaid tagihan",
       unpaidCount: unpaidTagihan.length,
-      unpaidTagihan: unpaidTagihan
-    });
+      unpaidTagihan: unpaidTagihan,
+      notificationStatus: {
+        attempted: unpaidTagihan.length > 0,
+        tokenCount: 0,
+        sent: false
+      }
+    };
+
+    // Add notification status if tokens were checked
+    if (unpaidTagihan.length > 0) {
+      const [tokens] = await connection.execute(
+        "SELECT COUNT(*) as count FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
+        [req.user.id]
+      );
+      response.notificationStatus.tokenCount = tokens[0].count;
+      response.notificationStatus.sent = tokens[0].count > 0;
+    }
+
+    await connection.end();
+    res.json(response);
   } catch (error) {
     console.error("ERROR CHECK UNPAID TAGIHAN:", error.message);
     res.status(500).json({ error: "Failed to check unpaid tagihan" });
