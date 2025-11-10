@@ -83,16 +83,6 @@ if (FCM_ENABLED) {
   console.log("⚠️ FCM is disabled (FCM_ENABLED=false or not set)");
 }
 
-// Tambahkan endpoint untuk cek status FCM
-app.get("/api/fcm-status", authenticateToken, (req, res) => {
-  res.json({
-    fcm_enabled: FCM_ENABLED,
-    firebase_initialized: firebaseInitialized,
-    firebase_error: firebaseError,
-    project_id: firebaseInitialized ? "Loaded" : "Not loaded",
-  });
-});
-
 // Konfigurasi database langsung (ganti dengan nilai yang sesuai)
 const dbConfig = {
   host: process.env.DB_HOST,
@@ -512,6 +502,60 @@ async function sendNotificationToKelas(
     return { success: false, error: error.message };
   }
 }
+
+// Tambahkan endpoint untuk cek status FCM
+app.get("/api/fcm-status", authenticateToken, (req, res) => {
+  res.json({
+    fcm_enabled: FCM_ENABLED,
+    firebase_initialized: firebaseInitialized,
+    firebase_error: firebaseError,
+    project_id: firebaseInitialized ? "Loaded" : "Not loaded",
+  });
+});
+
+// Endpoint untuk cek FCM config detail
+app.get('/api/fcm-config', authenticateToken, (req, res) => {
+  const config = {
+    fcm_enabled: FCM_ENABLED,
+    firebase_initialized: firebaseInitialized,
+    firebase_apps_count: admin.apps ? admin.apps.length : 0,
+    project_id: firebaseInitialized ? admin.app().options.projectId : 'Not initialized'
+  };
+  
+  res.json(config);
+});
+
+// Endpoint untuk test FCM
+app.post('/api/test-fcm', authenticateToken, async (req, res) => {
+  try {
+    const { testToken } = req.body;
+    
+    if (!testToken) {
+      return res.status(400).json({ error: 'testToken required' });
+    }
+
+    console.log('🧪 Testing FCM with token:', testToken);
+
+    const testResult = await sendFCMNotificationBatch(
+      [testToken],
+      'Test Notification',
+      'This is a test notification from the server',
+      { type: 'test', timestamp: Date.now().toString() }
+    );
+
+    res.json({
+      success: testResult.success,
+      message: testResult.success ? 'FCM test sent successfully' : 'FCM test failed',
+      details: testResult
+    });
+  } catch (error) {
+    console.error('FCM Test Error:', error);
+    res.status(500).json({ 
+      error: 'FCM test failed',
+      details: error.message 
+    });
+  }
+});
 
 // Konfigurasi storage untuk multer - PERBAIKI INI
 const storage = multer.diskStorage({
@@ -11558,7 +11602,7 @@ app.post("/api/fcm/test", authenticateToken, async (req, res) => {
         .json({ error: "No active FCM tokens found for user" });
     }
 
-    const result = await sendFCMNotification(
+    const result = await sendFCMNotificationBatch(
       tokens[0].token,
       title || "Test Notification",
       body || "This is a test notification from Manajemen Sekolah",
