@@ -11,7 +11,7 @@ logs/
 *.log
 npm-debug.log*
 
-# OS files
+# OS filest6
 .DS_Store
 Thumbs.db
 
@@ -30,4 +30,6 @@ uploads/
 # Temporary files
 tmp/
 temp/
+
+serviceAccountKey.json
 
