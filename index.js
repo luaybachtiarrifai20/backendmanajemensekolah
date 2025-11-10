@@ -17,45 +17,81 @@ app.use(express.json());
 app.use(cors());
 
 // Firebase Admin SDK Configuration
-const FCM_ENABLED = process.env.FCM_ENABLED === 'true';
+const FCM_ENABLED = process.env.FCM_ENABLED === "true";
 const FCM_SERVICE_ACCOUNT_PATH = process.env.FCM_SERVICE_ACCOUNT_PATH;
 const FCM_SERVICE_ACCOUNT = process.env.FCM_SERVICE_ACCOUNT; // Full JSON as string
 
 // Initialize Firebase Admin
 let firebaseInitialized = false;
+let firebaseError = null;
+
 if (FCM_ENABLED) {
   try {
     let serviceAccount;
-    
+
     // Try to load from environment variable first (for Vercel)
     if (FCM_SERVICE_ACCOUNT) {
-      console.log('📱 Loading Firebase service account from environment variable');
-      serviceAccount = JSON.parse(FCM_SERVICE_ACCOUNT);
-    } 
+      console.log(
+        "📱 Loading Firebase service account from environment variable"
+      );
+      try {
+        serviceAccount = JSON.parse(FCM_SERVICE_ACCOUNT);
+      } catch (parseError) {
+        console.error(
+          "❌ Failed to parse FCM_SERVICE_ACCOUNT:",
+          parseError.message
+        );
+        firebaseError = parseError.message;
+      }
+    }
     // Fallback to file path (for local development)
     else if (FCM_SERVICE_ACCOUNT_PATH) {
-      console.log('📱 Loading Firebase service account from file:', FCM_SERVICE_ACCOUNT_PATH);
-      serviceAccount = require(FCM_SERVICE_ACCOUNT_PATH);
+      console.log(
+        "📱 Loading Firebase service account from file:",
+        FCM_SERVICE_ACCOUNT_PATH
+      );
+      try {
+        serviceAccount = require(FCM_SERVICE_ACCOUNT_PATH);
+      } catch (fileError) {
+        console.error(
+          "❌ Failed to load FCM service account file:",
+          fileError.message
+        );
+        firebaseError = fileError.message;
+      }
     }
-    
-    if (serviceAccount) {
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
-      });
+
+    if (serviceAccount && serviceAccount.project_id) {
+      // Check if already initialized
+      if (admin.apps.length === 0) {
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+        });
+      }
       firebaseInitialized = true;
-      console.log('✅ Firebase Admin SDK initialized successfully');
-      console.log('📧 Project ID:', serviceAccount.project_id);
+      console.log("✅ Firebase Admin SDK initialized successfully");
+      console.log("📧 Project ID:", serviceAccount.project_id);
     } else {
-      console.error('❌ No Firebase service account found');
-      console.error('💡 Set FCM_SERVICE_ACCOUNT env var or FCM_SERVICE_ACCOUNT_PATH');
+      console.error("❌ No valid Firebase service account found");
+      firebaseError = "Invalid service account configuration";
     }
   } catch (error) {
-    console.error('❌ Firebase Admin SDK initialization error:', error.message);
-    console.error('💡 Check your serviceAccountKey.json or FCM_SERVICE_ACCOUNT env var');
+    console.error("❌ Firebase Admin SDK initialization error:", error.message);
+    firebaseError = error.message;
   }
 } else {
-  console.log('⚠️ FCM is disabled (FCM_ENABLED=false or not set)');
+  console.log("⚠️ FCM is disabled (FCM_ENABLED=false or not set)");
 }
+
+// Tambahkan endpoint untuk cek status FCM
+app.get("/api/fcm-status", authenticateToken, (req, res) => {
+  res.json({
+    fcm_enabled: FCM_ENABLED,
+    firebase_initialized: firebaseInitialized,
+    firebase_error: firebaseError,
+    project_id: firebaseInitialized ? "Loaded" : "Not loaded",
+  });
+});
 
 // Konfigurasi database langsung (ganti dengan nilai yang sesuai)
 const dbConfig = {
@@ -64,7 +100,7 @@ const dbConfig = {
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT || 3306, // default value jika tidak ada
-  timezone: '+07:00', // Set timezone to Asia/Jakarta (WIB)
+  timezone: "+07:00", // Set timezone to Asia/Jakarta (WIB)
 };
 
 const JWT_SECRET = "secret_key_yang_aman_dan_unik";
@@ -220,56 +256,95 @@ const authenticateTokenAndSchool = async (req, res, next) => {
 function sanitizeFCMData(data) {
   const sanitized = {};
   for (const [key, value] of Object.entries(data)) {
-    sanitized[key] = value !== null && value !== undefined ? String(value) : '';
+    sanitized[key] = value !== null && value !== undefined ? String(value) : "";
   }
   return sanitized;
 }
 
 // Send FCM notification to single device
-async function sendFCMNotification(token, title, body, data = {}) {
-  if (!FCM_ENABLED || !firebaseInitialized) {
-    console.log('FCM disabled, skipping notification');
-    return { success: false, error: 'FCM not configured' };
+// Fungsi yang diperbaiki
+async function sendFCMNotificationBatch(tokens, title, body, data = {}) {
+  if (!FCM_ENABLED || !firebaseInitialized || tokens.length === 0) {
+    console.log("FCM disabled or no tokens available");
+    return { success: false, error: "FCM not configured or no tokens" };
+  }
+
+  // Validasi tokens
+  const validTokens = tokens.filter(
+    (token) => token && typeof token === "string" && token.length > 0
+  );
+
+  if (validTokens.length === 0) {
+    return { success: false, error: "No valid FCM tokens" };
   }
 
   const message = {
-    token: token,
     notification: {
       title: title,
       body: body,
     },
     data: sanitizeFCMData(data),
     android: {
-      priority: 'high',
+      priority: "high",
       notification: {
-        sound: 'default',
-        channelId: 'high_importance_channel',
-      }
+        sound: "default",
+        channelId: "high_importance_channel",
+      },
     },
     apns: {
       payload: {
         aps: {
-          sound: 'default',
+          sound: "default",
           badge: 1,
-        }
-      }
-    }
+        },
+      },
+    },
+    tokens: validTokens,
   };
 
   try {
-    const response = await admin.messaging().send(message);
-    console.log('FCM Success:', response);
-    return { success: true, response: response };
+    console.log(`📤 Sending FCM batch to ${validTokens.length} devices`);
+    const response = await admin.messaging().sendMulticast(message);
+
+    console.log(
+      `✅ FCM Batch Success: ${response.successCount}/${validTokens.length} sent`
+    );
+
+    if (response.failureCount > 0) {
+      const failedTokens = response.responses
+        .map((r, idx) => (!r.success ? validTokens[idx] : null))
+        .filter((t) => t !== null);
+
+      console.log("❌ Failed tokens:", failedTokens);
+      console.log(
+        "Failure details:",
+        response.responses.filter((r) => !r.success)
+      );
+    }
+
+    return {
+      success: true,
+      response: response,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+    };
   } catch (error) {
-    console.error('FCM Send Error:', error.message);
-    return { success: false, error: error.message };
+    console.error("❌ FCM Batch Send Error:", error.message);
+    console.error("Error code:", error.code);
+    console.error("Error details:", error);
+
+    return {
+      success: false,
+      error: error.message,
+      code: error.code,
+    };
   }
 }
 
 // Send FCM notification to multiple devices (batch)
 async function sendFCMNotificationBatch(tokens, title, body, data = {}) {
   if (!FCM_ENABLED || !firebaseInitialized || tokens.length === 0) {
-    return { success: false, error: 'FCM not configured or no tokens' };
+    return { success: false, error: "FCM not configured or no tokens" };
   }
 
   const message = {
@@ -279,79 +354,99 @@ async function sendFCMNotificationBatch(tokens, title, body, data = {}) {
     },
     data: sanitizeFCMData(data),
     android: {
-      priority: 'high',
+      priority: "high",
       notification: {
-        sound: 'default',
-        channelId: 'high_importance_channel',
-      }
+        sound: "default",
+        channelId: "high_importance_channel",
+      },
     },
     apns: {
       payload: {
         aps: {
-          sound: 'default',
+          sound: "default",
           badge: 1,
-        }
-      }
+        },
+      },
     },
-    tokens: tokens // Firebase Admin SDK supports up to 500 tokens per batch
+    tokens: tokens, // Firebase Admin SDK supports up to 500 tokens per batch
   };
 
   try {
     const response = await admin.messaging().sendMulticast(message);
-    console.log(`FCM Batch Success: ${response.successCount}/${tokens.length} sent`);
+    console.log(
+      `FCM Batch Success: ${response.successCount}/${tokens.length} sent`
+    );
     if (response.failureCount > 0) {
-      console.log('Failed tokens:', response.responses
-        .map((r, idx) => r.success ? null : tokens[idx])
-        .filter(t => t !== null)
+      console.log(
+        "Failed tokens:",
+        response.responses
+          .map((r, idx) => (r.success ? null : tokens[idx]))
+          .filter((t) => t !== null)
       );
     }
     return { success: true, response: response };
   } catch (error) {
-    console.error('FCM Batch Send Error:', error.message);
+    console.error("FCM Batch Send Error:", error.message);
     return { success: false, error: error.message };
   }
 }
 
 // Log notification to database
-async function logNotification(connection, userId, title, body, type, referenceId, fcmResponse, isSent) {
+async function logNotification(
+  connection,
+  userId,
+  title,
+  body,
+  type,
+  referenceId,
+  fcmResponse,
+  isSent
+) {
   try {
     const logId = crypto.randomUUID();
-    
+
     // Handle undefined values
     const safeReferenceId = referenceId || null;
     const safeFcmResponse = fcmResponse ? JSON.stringify(fcmResponse) : null;
     const safeIsSent = isSent === true || isSent === 1 ? 1 : 0;
     const safeSentAt = safeIsSent ? new Date() : null;
-    
+
     await connection.execute(
       `INSERT INTO notification_logs 
        (id, user_id, title, body, type, reference_id, fcm_response, is_sent, sent_at) 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        logId, 
-        userId, 
-        title, 
-        body, 
-        type, 
-        safeReferenceId, 
-        safeFcmResponse, 
+        logId,
+        userId,
+        title,
+        body,
+        type,
+        safeReferenceId,
+        safeFcmResponse,
         safeIsSent,
-        safeSentAt
+        safeSentAt,
       ]
     );
     return logId;
   } catch (error) {
-    console.error('Error logging notification:', error);
+    console.error("Error logging notification:", error);
     return null;
   }
 }
 
 // Send notification to all wali murid of siswa in specific kelas
-async function sendNotificationToKelas(connection, kelasId, title, body, type, referenceId) {
+// Di fungsi yang memanggil notifikasi
+async function sendNotificationToKelas(
+  connection,
+  kelasId,
+  title,
+  body,
+  type,
+  referenceId
+) {
   try {
     console.log(`📤 Attempting to send notification to kelas: ${kelasId}`);
-    console.log(`   Title: ${title}, Type: ${type}`);
-    
+
     // Get all wali murid tokens for siswa in this kelas
     const [tokens] = await connection.execute(
       `SELECT DISTINCT ft.token, ft.user_id, u.nama as user_nama
@@ -363,32 +458,33 @@ async function sendNotificationToKelas(connection, kelasId, title, body, type, r
     );
 
     console.log(`📊 Found ${tokens.length} FCM tokens for kelas ${kelasId}`);
-    
+
     if (tokens.length === 0) {
-      console.log('⚠️ No FCM tokens found for kelas:', kelasId);
-      console.log('💡 Wali murid belum login atau FCM token belum terdaftar');
-      return { success: false, count: 0 };
+      console.log("⚠️ No FCM tokens found for kelas:", kelasId);
+      return { success: false, count: 0, error: "No tokens available" };
     }
 
-    tokens.forEach((t, i) => {
-      console.log(`   ${i+1}. ${t.user_nama} (Token: ${t.token.substring(0, 20)}...)`);
+    const tokenList = tokens.map((t) => t.token);
+    const result = await sendFCMNotificationBatch(tokenList, title, body, {
+      type,
+      reference_id: referenceId,
     });
 
-    const tokenList = tokens.map(t => t.token);
-    const result = await sendFCMNotificationBatch(
-      tokenList, 
-      title, 
-      body, 
-      { type, reference_id: referenceId }
-    );
-
+    // Log results
     if (result.success) {
-      console.log(`✅ Notification sent successfully to ${tokens.length} wali murid`);
+      console.log(
+        `✅ Notification sent successfully to ${result.successCount} wali murid`
+      );
+      if (result.failureCount > 0) {
+        console.log(`⚠️ ${result.failureCount} notifications failed`);
+      }
     } else {
       console.log(`❌ Failed to send notification: ${result.error}`);
+      // Jangan return error di sini, biarkan proses continue
+      // Karena notifikasi mungkin tidak critical
     }
 
-    // Log each notification
+    // Log each notification regardless of FCM success
     for (const tokenData of tokens) {
       await logNotification(
         connection,
@@ -397,14 +493,22 @@ async function sendNotificationToKelas(connection, kelasId, title, body, type, r
         body,
         type,
         referenceId,
-        JSON.stringify(result.response),
+        result.success
+          ? JSON.stringify(result.response)
+          : JSON.stringify(result.error),
         result.success
       );
     }
 
-    return { success: true, count: tokens.length, result };
+    return {
+      success: true,
+      count: tokens.length,
+      sentCount: result.successCount || 0,
+      failedCount: result.failureCount || 0,
+      fcmResult: result,
+    };
   } catch (error) {
-    console.error('❌ Error sending notification to kelas:', error);
+    console.error("❌ Error sending notification to kelas:", error);
     return { success: false, error: error.message };
   }
 }
@@ -1417,12 +1521,12 @@ app.post("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah kelas baru:", req.body);
     const { nama, wali_kelas_id, grade_level } = req.body;
-    
+
     // Validasi field wajib
     if (!nama) {
       return res.status(400).json({ error: "Nama kelas harus diisi" });
     }
-    
+
     const id = crypto.randomUUID();
 
     // Konversi undefined ke null untuk MySQL
@@ -5714,8 +5818,8 @@ app.get("/api/materi-progress", authenticateToken, async (req, res) => {
     console.log("Mengambil data progress materi");
 
     if (!guru_id || !mata_pelajaran_id) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id dan mata_pelajaran_id diperlukan" 
+      return res.status(400).json({
+        error: "Parameter guru_id dan mata_pelajaran_id diperlukan",
       });
     }
 
@@ -5727,7 +5831,10 @@ app.get("/api/materi-progress", authenticateToken, async (req, res) => {
     );
     await connection.end();
 
-    console.log("Berhasil mengambil data progress materi, jumlah:", progress.length);
+    console.log(
+      "Berhasil mengambil data progress materi, jumlah:",
+      progress.length
+    );
     res.json(progress);
   } catch (error) {
     console.error("ERROR GET MATERI PROGRESS:", error.message);
@@ -5739,29 +5846,36 @@ app.get("/api/materi-progress", authenticateToken, async (req, res) => {
 app.post("/api/materi-progress", authenticateToken, async (req, res) => {
   try {
     console.log("Menyimpan progress materi:", req.body);
-    const { guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked } = req.body;
+    const { guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked } =
+      req.body;
 
     if (!guru_id || !mata_pelajaran_id) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id dan mata_pelajaran_id diperlukan" 
+      return res.status(400).json({
+        error: "Parameter guru_id dan mata_pelajaran_id diperlukan",
       });
     }
 
     // At least bab_id must be provided
     if (!bab_id) {
-      return res.status(400).json({ 
-        error: "Parameter bab_id diperlukan" 
+      return res.status(400).json({
+        error: "Parameter bab_id diperlukan",
       });
     }
 
     const connection = await getConnection();
-    
+
     // Check if record already exists
     const [existing] = await connection.execute(
       `SELECT * FROM materi_progress 
        WHERE guru_id = ? AND mata_pelajaran_id = ? 
        AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-      [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+      [
+        guru_id,
+        mata_pelajaran_id,
+        bab_id,
+        sub_bab_id || null,
+        sub_bab_id || null,
+      ]
     );
 
     if (existing.length > 0) {
@@ -5772,7 +5886,15 @@ app.post("/api/materi-progress", authenticateToken, async (req, res) => {
          SET is_checked = ?, is_generated = IF(? = FALSE, FALSE, is_generated), updated_at = CURRENT_TIMESTAMP 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [is_checked, is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+        [
+          is_checked,
+          is_checked,
+          guru_id,
+          mata_pelajaran_id,
+          bab_id,
+          sub_bab_id || null,
+          sub_bab_id || null,
+        ]
       );
       console.log("Progress materi berhasil diupdate");
     } else {
@@ -5785,11 +5907,11 @@ app.post("/api/materi-progress", authenticateToken, async (req, res) => {
       );
       console.log("Progress materi berhasil ditambahkan");
     }
-    
+
     await connection.end();
-    res.json({ 
+    res.json({
       message: "Progress materi berhasil disimpan",
-      is_checked: is_checked 
+      is_checked: is_checked,
     });
   } catch (error) {
     console.error("ERROR SAVE MATERI PROGRESS:", error.message);
@@ -5804,26 +5926,38 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
     console.log("Menyimpan batch progress materi:", req.body);
     const { guru_id, mata_pelajaran_id, progress_items } = req.body;
 
-    if (!guru_id || !mata_pelajaran_id || !progress_items || !Array.isArray(progress_items)) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id, mata_pelajaran_id, dan progress_items diperlukan" 
+    if (
+      !guru_id ||
+      !mata_pelajaran_id ||
+      !progress_items ||
+      !Array.isArray(progress_items)
+    ) {
+      return res.status(400).json({
+        error:
+          "Parameter guru_id, mata_pelajaran_id, dan progress_items diperlukan",
       });
     }
 
     const connection = await getConnection();
-    
+
     // Process each item
     for (const item of progress_items) {
       const { bab_id, sub_bab_id, is_checked } = item;
-      
+
       if (!bab_id) continue; // Skip invalid items
-      
+
       // Check if record exists
       const [existing] = await connection.execute(
         `SELECT * FROM materi_progress 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+        [
+          guru_id,
+          mata_pelajaran_id,
+          bab_id,
+          sub_bab_id || null,
+          sub_bab_id || null,
+        ]
       );
 
       if (existing.length > 0) {
@@ -5834,7 +5968,15 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
            SET is_checked = ?, is_generated = IF(? = FALSE, FALSE, is_generated), updated_at = CURRENT_TIMESTAMP 
            WHERE guru_id = ? AND mata_pelajaran_id = ? 
            AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-          [is_checked, is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+          [
+            is_checked,
+            is_checked,
+            guru_id,
+            mata_pelajaran_id,
+            bab_id,
+            sub_bab_id || null,
+            sub_bab_id || null,
+          ]
         );
       } else {
         // Insert
@@ -5846,12 +5988,14 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
         );
       }
     }
-    
+
     await connection.end();
-    console.log(`Batch progress materi berhasil disimpan, jumlah: ${progress_items.length}`);
-    res.json({ 
+    console.log(
+      `Batch progress materi berhasil disimpan, jumlah: ${progress_items.length}`
+    );
+    res.json({
       message: "Batch progress materi berhasil disimpan",
-      count: progress_items.length 
+      count: progress_items.length,
     });
   } catch (error) {
     console.error("ERROR BATCH SAVE MATERI PROGRESS:", error.message);
@@ -5860,87 +6004,113 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
 });
 
 // Mark materi as generated (when used for RPP/activity generation)
-app.post("/api/materi-progress/mark-generated", authenticateToken, async (req, res) => {
-  try {
-    console.log("Menandai materi sebagai sudah di-generate:", req.body);
-    const { guru_id, mata_pelajaran_id, items } = req.body;
+app.post(
+  "/api/materi-progress/mark-generated",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      console.log("Menandai materi sebagai sudah di-generate:", req.body);
+      const { guru_id, mata_pelajaran_id, items } = req.body;
 
-    if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan" 
-      });
-    }
+      if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
+        return res.status(400).json({
+          error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan",
+        });
+      }
 
-    const connection = await getConnection();
-    
-    // Mark each item as generated
-    for (const item of items) {
-      const { bab_id, sub_bab_id } = item;
-      
-      if (!bab_id) continue;
-      
-      // Update the is_generated flag
-      await connection.execute(
-        `UPDATE materi_progress 
+      const connection = await getConnection();
+
+      // Mark each item as generated
+      for (const item of items) {
+        const { bab_id, sub_bab_id } = item;
+
+        if (!bab_id) continue;
+
+        // Update the is_generated flag
+        await connection.execute(
+          `UPDATE materi_progress 
          SET is_generated = TRUE, updated_at = CURRENT_TIMESTAMP 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+          [
+            guru_id,
+            mata_pelajaran_id,
+            bab_id,
+            sub_bab_id || null,
+            sub_bab_id || null,
+          ]
+        );
+      }
+
+      await connection.end();
+      console.log(
+        `Materi berhasil ditandai sebagai generated, jumlah: ${items.length}`
       );
+      res.json({
+        message: "Materi berhasil ditandai sebagai sudah di-generate",
+        count: items.length,
+      });
+    } catch (error) {
+      console.error("ERROR MARK GENERATED:", error.message);
+      res
+        .status(500)
+        .json({ error: "Gagal menandai materi sebagai generated" });
     }
-    
-    await connection.end();
-    console.log(`Materi berhasil ditandai sebagai generated, jumlah: ${items.length}`);
-    res.json({ 
-      message: "Materi berhasil ditandai sebagai sudah di-generate",
-      count: items.length 
-    });
-  } catch (error) {
-    console.error("ERROR MARK GENERATED:", error.message);
-    res.status(500).json({ error: "Gagal menandai materi sebagai generated" });
   }
-});
+);
 
 // Reset generated status (to allow regeneration)
-app.post("/api/materi-progress/reset-generated", authenticateToken, async (req, res) => {
-  try {
-    console.log("Reset status generated materi:", req.body);
-    const { guru_id, mata_pelajaran_id, items } = req.body;
+app.post(
+  "/api/materi-progress/reset-generated",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      console.log("Reset status generated materi:", req.body);
+      const { guru_id, mata_pelajaran_id, items } = req.body;
 
-    if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan" 
-      });
-    }
+      if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
+        return res.status(400).json({
+          error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan",
+        });
+      }
 
-    const connection = await getConnection();
-    
-    // Reset is_generated flag for each item
-    for (const item of items) {
-      const { bab_id, sub_bab_id } = item;
-      
-      if (!bab_id) continue;
-      
-      await connection.execute(
-        `UPDATE materi_progress 
+      const connection = await getConnection();
+
+      // Reset is_generated flag for each item
+      for (const item of items) {
+        const { bab_id, sub_bab_id } = item;
+
+        if (!bab_id) continue;
+
+        await connection.execute(
+          `UPDATE materi_progress 
          SET is_generated = FALSE, updated_at = CURRENT_TIMESTAMP 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+          [
+            guru_id,
+            mata_pelajaran_id,
+            bab_id,
+            sub_bab_id || null,
+            sub_bab_id || null,
+          ]
+        );
+      }
+
+      await connection.end();
+      console.log(
+        `Status generated berhasil di-reset, jumlah: ${items.length}`
       );
+      res.json({
+        message: "Status generated berhasil di-reset",
+        count: items.length,
+      });
+    } catch (error) {
+      console.error("ERROR RESET GENERATED:", error.message);
+      res.status(500).json({ error: "Gagal reset status generated" });
     }
-    
-    await connection.end();
-    console.log(`Status generated berhasil di-reset, jumlah: ${items.length}`);
-    res.json({ 
-      message: "Status generated berhasil di-reset",
-      count: items.length 
-    });
-  } catch (error) {
-    console.error("ERROR RESET GENERATED:", error.message);
-    res.status(500).json({ error: "Gagal reset status generated" });
   }
-});
+);
 
 // ==================== END MATERI PROGRESS ENDPOINTS ====================
 
@@ -9432,10 +9602,12 @@ app.get("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
 // Get Pengumuman dengan filter berdasarkan role
 app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log(`Mengambil data pengumuman untuk sekolah: ${req.sekolah_id} user role: ${req.user.role}`);
-    
+    console.log(
+      `Mengambil data pengumuman untuk sekolah: ${req.sekolah_id} user role: ${req.user.role}`
+    );
+
     const connection = await getConnection();
-    
+
     let query = `
       SELECT p.*, 
         u.nama as pembuat_nama,
@@ -9447,13 +9619,13 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
     let params = [req.sekolah_id];
 
     // Filter berdasarkan role user
-    if (req.user.role === 'wali') {
+    if (req.user.role === "wali") {
       // Untuk wali, hanya tampilkan pengumuman yang ditujukan untuk wali atau semua
       query += ` AND (p.role_target LIKE 'wali' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
-    } else if (req.user.role === 'guru') {
+    } else if (req.user.role === "guru") {
       // Untuk guru, tampilkan pengumuman untuk guru atau semua
       query += ` AND (p.role_target LIKE 'guru' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
-    } else if (req.user.role === 'siswa') {
+    } else if (req.user.role === "siswa") {
       // Untuk siswa, tampilkan pengumuman untuk siswa atau semua
       query += ` AND (p.role_target LIKE 'siswa' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
     }
@@ -9465,7 +9637,10 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
     const [pengumuman] = await connection.execute(query, params);
     await connection.end();
 
-    console.log("Berhasil mengambil data pengumuman, jumlah:", pengumuman.length);
+    console.log(
+      "Berhasil mengambil data pengumuman, jumlah:",
+      pengumuman.length
+    );
     res.json(pengumuman);
   } catch (error) {
     console.error("ERROR GET PENGUMUMAN:", error.message);
@@ -10552,21 +10727,23 @@ async function generateTagihanOtomatis() {
           );
 
           console.log(`Tagihan dibuat: ${tagihanId} untuk siswa ${siswa.id}`);
-          
+
           // Get kelas_id untuk siswa ini
           const [siswaData] = await connection.execute(
             "SELECT kelas_id FROM siswa WHERE id = ?",
             [siswa.id]
           );
-          
+
           if (siswaData.length > 0 && siswaData[0].kelas_id) {
             // Send notification to all wali murid in this kelas
             await sendNotificationToKelas(
               connection,
               siswaData[0].kelas_id,
-              'Tagihan Baru',
-              `Tagihan ${jenis.nama} sebesar Rp ${jenis.jumlah.toLocaleString()} telah dibuat`,
-              'tagihan',
+              "Tagihan Baru",
+              `Tagihan ${
+                jenis.nama
+              } sebesar Rp ${jenis.jumlah.toLocaleString()} telah dibuat`,
+              "tagihan",
               tagihanId
             );
           }
@@ -11284,19 +11461,19 @@ app.get("/api/health", async (req, res) => {
 app.post("/api/fcm/register", authenticateToken, async (req, res) => {
   try {
     const { token, device_type, device_info } = req.body;
-    
+
     if (!token) {
       return res.status(400).json({ error: "FCM token is required" });
     }
-    
+
     const connection = await getConnection();
-    
+
     // Check if token already exists for this user
     const [existing] = await connection.execute(
       "SELECT id FROM fcm_tokens WHERE user_id = ? AND token = ?",
       [req.user.id, token]
     );
-    
+
     if (existing.length > 0) {
       // Update existing token
       await connection.execute(
@@ -11304,30 +11481,30 @@ app.post("/api/fcm/register", authenticateToken, async (req, res) => {
          SET is_active = TRUE, device_type = ?, device_info = ?, 
              last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
-        [device_type || 'android', device_info, existing[0].id]
+        [device_type || "android", device_info, existing[0].id]
       );
-      
+
       await connection.end();
-      return res.json({ 
+      return res.json({
         message: "FCM token updated successfully",
-        token_id: existing[0].id 
+        token_id: existing[0].id,
       });
     }
-    
+
     // Create new token
     const tokenId = crypto.randomUUID();
     await connection.execute(
       `INSERT INTO fcm_tokens (id, user_id, token, device_type, device_info, is_active)
        VALUES (?, ?, ?, ?, ?, TRUE)`,
-      [tokenId, req.user.id, token, device_type || 'android', device_info]
+      [tokenId, req.user.id, token, device_type || "android", device_info]
     );
-    
+
     await connection.end();
     console.log(`FCM token registered for user ${req.user.id}`);
-    
-    res.json({ 
+
+    res.json({
       message: "FCM token registered successfully",
-      token_id: tokenId 
+      token_id: tokenId,
     });
   } catch (error) {
     console.error("ERROR REGISTER FCM TOKEN:", error.message);
@@ -11339,21 +11516,21 @@ app.post("/api/fcm/register", authenticateToken, async (req, res) => {
 app.post("/api/fcm/unregister", authenticateToken, async (req, res) => {
   try {
     const { token } = req.body;
-    
+
     if (!token) {
       return res.status(400).json({ error: "FCM token is required" });
     }
-    
+
     const connection = await getConnection();
-    
+
     await connection.execute(
       "UPDATE fcm_tokens SET is_active = FALSE WHERE user_id = ? AND token = ?",
       [req.user.id, token]
     );
-    
+
     await connection.end();
     console.log(`FCM token unregistered for user ${req.user.id}`);
-    
+
     res.json({ message: "FCM token unregistered successfully" });
   } catch (error) {
     console.error("ERROR UNREGISTER FCM TOKEN:", error.message);
@@ -11365,43 +11542,45 @@ app.post("/api/fcm/unregister", authenticateToken, async (req, res) => {
 app.post("/api/fcm/test", authenticateToken, async (req, res) => {
   try {
     const { title, body } = req.body;
-    
+
     const connection = await getConnection();
-    
+
     // Get user's active tokens
     const [tokens] = await connection.execute(
       "SELECT token FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
       [req.user.id]
     );
-    
+
     if (tokens.length === 0) {
       await connection.end();
-      return res.status(404).json({ error: "No active FCM tokens found for user" });
+      return res
+        .status(404)
+        .json({ error: "No active FCM tokens found for user" });
     }
-    
+
     const result = await sendFCMNotification(
       tokens[0].token,
-      title || 'Test Notification',
-      body || 'This is a test notification from Manajemen Sekolah',
-      { type: 'test' }
+      title || "Test Notification",
+      body || "This is a test notification from Manajemen Sekolah",
+      { type: "test" }
     );
-    
+
     await logNotification(
       connection,
       req.user.id,
-      title || 'Test Notification',
-      body || 'This is a test notification',
-      'general',
+      title || "Test Notification",
+      body || "This is a test notification",
+      "general",
       null,
       result.response,
       result.success
     );
-    
+
     await connection.end();
-    
-    res.json({ 
+
+    res.json({
       message: "Test notification sent",
-      result: result 
+      result: result,
     });
   } catch (error) {
     console.error("ERROR SEND TEST NOTIFICATION:", error.message);
@@ -11413,7 +11592,7 @@ app.post("/api/fcm/test", authenticateToken, async (req, res) => {
 app.get("/api/notifications/history", authenticateToken, async (req, res) => {
   try {
     const connection = await getConnection();
-    
+
     const [notifications] = await connection.execute(
       `SELECT id, title, body, type, reference_id, is_sent, sent_at, created_at
        FROM notification_logs
@@ -11422,7 +11601,7 @@ app.get("/api/notifications/history", authenticateToken, async (req, res) => {
        LIMIT 50`,
       [req.user.id]
     );
-    
+
     await connection.end();
     res.json(notifications);
   } catch (error) {
@@ -11432,24 +11611,27 @@ app.get("/api/notifications/history", authenticateToken, async (req, res) => {
 });
 
 // Check unpaid tagihan on login and send notification
-app.post("/api/notifications/check-unpaid-tagihan", authenticateToken, async (req, res) => {
-  try {
-    const connection = await getConnection();
-    
-    // Only for wali murid
-    const [user] = await connection.execute(
-      "SELECT role, siswa_id FROM users WHERE id = ?",
-      [req.user.id]
-    );
-    
-    if (user.length === 0 || user[0].role !== 'wali') {
-      await connection.end();
-      return res.json({ message: "Not a wali murid", unpaidCount: 0 });
-    }
-    
-    // Get unpaid tagihan for this wali's siswa
-    const [unpaidTagihan] = await connection.execute(
-      `SELECT 
+app.post(
+  "/api/notifications/check-unpaid-tagihan",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const connection = await getConnection();
+
+      // Only for wali murid
+      const [user] = await connection.execute(
+        "SELECT role, siswa_id FROM users WHERE id = ?",
+        [req.user.id]
+      );
+
+      if (user.length === 0 || user[0].role !== "wali") {
+        await connection.end();
+        return res.json({ message: "Not a wali murid", unpaidCount: 0 });
+      }
+
+      // Get unpaid tagihan for this wali's siswa
+      const [unpaidTagihan] = await connection.execute(
+        `SELECT 
         t.id,
         t.jumlah,
         jp.nama as jenis_pembayaran,
@@ -11459,90 +11641,104 @@ app.post("/api/notifications/check-unpaid-tagihan", authenticateToken, async (re
        LEFT JOIN pembayaran p ON t.id = p.tagihan_id AND p.status = 'verified'
        WHERE t.siswa_id = ? AND p.id IS NULL
        ORDER BY t.jatuh_tempo ASC`,
-      [user[0].siswa_id]
-    );
-    
-    console.log(`📋 Found ${unpaidTagihan.length} unpaid tagihan for user ${req.user.id}`);
-    
-    if (unpaidTagihan.length > 0) {
-      // Get user's FCM tokens
-      const [tokens] = await connection.execute(
-        "SELECT token FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
-        [req.user.id]
+        [user[0].siswa_id]
       );
-      
-      console.log(`📱 Found ${tokens.length} FCM tokens for user ${req.user.id}`);
-      
-      if (tokens.length === 0) {
-        console.log('⚠️ No FCM tokens found for this user');
-        console.log('💡 User needs to login via Flutter app and get APNS token first');
-      }
-      
-      if (tokens.length > 0) {
-        // Calculate total unpaid
-        const totalUnpaid = unpaidTagihan.reduce((sum, t) => sum + parseFloat(t.jumlah), 0);
-        
-        // Send notification
-        const title = 'Tagihan Belum Dibayar';
-        const body = `Anda memiliki ${unpaidTagihan.length} tagihan yang belum dibayar dengan total Rp ${totalUnpaid.toLocaleString()}`;
-        
-        const tokenList = tokens.map(t => t.token);
-        const result = await sendFCMNotificationBatch(
-          tokenList,
-          title,
-          body,
-          { 
-            type: 'tagihan_reminder',
-            unpaid_count: String(unpaidTagihan.length),
-            total_amount: String(totalUnpaid)
-          }
-        );
-        
-        // Log notification
-        await logNotification(
-          connection,
-          req.user.id,
-          title,
-          body,
-          'tagihan_reminder',
-          null,
-          JSON.stringify(result.response),
-          result.success
-        );
-        
-        console.log(`✅ Sent unpaid tagihan notification to user ${req.user.id}`);
-      }
-    }
-    
-    // Build response with notification status
-    const response = {
-      message: "Checked unpaid tagihan",
-      unpaidCount: unpaidTagihan.length,
-      unpaidTagihan: unpaidTagihan,
-      notificationStatus: {
-        attempted: unpaidTagihan.length > 0,
-        tokenCount: 0,
-        sent: false
-      }
-    };
 
-    // Add notification status if tokens were checked
-    if (unpaidTagihan.length > 0) {
-      const [tokens] = await connection.execute(
-        "SELECT COUNT(*) as count FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
-        [req.user.id]
+      console.log(
+        `📋 Found ${unpaidTagihan.length} unpaid tagihan for user ${req.user.id}`
       );
-      response.notificationStatus.tokenCount = tokens[0].count;
-      response.notificationStatus.sent = tokens[0].count > 0;
-    }
 
-    await connection.end();
-    res.json(response);
-  } catch (error) {
-    console.error("ERROR CHECK UNPAID TAGIHAN:", error.message);
-    res.status(500).json({ error: "Failed to check unpaid tagihan" });
+      if (unpaidTagihan.length > 0) {
+        // Get user's FCM tokens
+        const [tokens] = await connection.execute(
+          "SELECT token FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
+          [req.user.id]
+        );
+
+        console.log(
+          `📱 Found ${tokens.length} FCM tokens for user ${req.user.id}`
+        );
+
+        if (tokens.length === 0) {
+          console.log("⚠️ No FCM tokens found for this user");
+          console.log(
+            "💡 User needs to login via Flutter app and get APNS token first"
+          );
+        }
+
+        if (tokens.length > 0) {
+          // Calculate total unpaid
+          const totalUnpaid = unpaidTagihan.reduce(
+            (sum, t) => sum + parseFloat(t.jumlah),
+            0
+          );
+
+          // Send notification
+          const title = "Tagihan Belum Dibayar";
+          const body = `Anda memiliki ${
+            unpaidTagihan.length
+          } tagihan yang belum dibayar dengan total Rp ${totalUnpaid.toLocaleString()}`;
+
+          const tokenList = tokens.map((t) => t.token);
+          const result = await sendFCMNotificationBatch(
+            tokenList,
+            title,
+            body,
+            {
+              type: "tagihan_reminder",
+              unpaid_count: String(unpaidTagihan.length),
+              total_amount: String(totalUnpaid),
+            }
+          );
+
+          // Log notification
+          await logNotification(
+            connection,
+            req.user.id,
+            title,
+            body,
+            "tagihan_reminder",
+            null,
+            JSON.stringify(result.response),
+            result.success
+          );
+
+          console.log(
+            `✅ Sent unpaid tagihan notification to user ${req.user.id}`
+          );
+        }
+      }
+
+      // Build response with notification status
+      const response = {
+        message: "Checked unpaid tagihan",
+        unpaidCount: unpaidTagihan.length,
+        unpaidTagihan: unpaidTagihan,
+        notificationStatus: {
+          attempted: unpaidTagihan.length > 0,
+          tokenCount: 0,
+          sent: false,
+        },
+      };
+
+      // Add notification status if tokens were checked
+      if (unpaidTagihan.length > 0) {
+        const [tokens] = await connection.execute(
+          "SELECT COUNT(*) as count FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
+          [req.user.id]
+        );
+        response.notificationStatus.tokenCount = tokens[0].count;
+        response.notificationStatus.sent = tokens[0].count > 0;
+      }
+
+      await connection.end();
+      res.json(response);
+    } catch (error) {
+      console.error("ERROR CHECK UNPAID TAGIHAN:", error.message);
+      res.status(500).json({ error: "Failed to check unpaid tagihan" });
+    }
   }
-});
+);
 
 // Endpoint untuk melihat daftar tabel yang ada
 app.get("/api/debug/tables", async (req, res) => {
