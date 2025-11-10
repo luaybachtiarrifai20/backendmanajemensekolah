@@ -216,6 +216,15 @@ const authenticateTokenAndSchool = async (req, res, next) => {
 
 // ==================== FCM HELPER FUNCTIONS ====================
 
+// Convert all data values to strings (FCM requirement)
+function sanitizeFCMData(data) {
+  const sanitized = {};
+  for (const [key, value] of Object.entries(data)) {
+    sanitized[key] = value !== null && value !== undefined ? String(value) : '';
+  }
+  return sanitized;
+}
+
 // Send FCM notification to single device
 async function sendFCMNotification(token, title, body, data = {}) {
   if (!FCM_ENABLED || !firebaseInitialized) {
@@ -229,7 +238,7 @@ async function sendFCMNotification(token, title, body, data = {}) {
       title: title,
       body: body,
     },
-    data: data,
+    data: sanitizeFCMData(data),
     android: {
       priority: 'high',
       notification: {
@@ -268,7 +277,7 @@ async function sendFCMNotificationBatch(tokens, title, body, data = {}) {
       title: title,
       body: body,
     },
-    data: data,
+    data: sanitizeFCMData(data),
     android: {
       priority: 'high',
       notification: {
@@ -11484,8 +11493,8 @@ app.post("/api/notifications/check-unpaid-tagihan", authenticateToken, async (re
           body,
           { 
             type: 'tagihan_reminder',
-            unpaid_count: unpaidTagihan.length,
-            total_amount: totalUnpaid
+            unpaid_count: String(unpaidTagihan.length),
+            total_amount: String(totalUnpaid)
           }
         );
         
